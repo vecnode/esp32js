@@ -78,6 +78,8 @@ typedef struct EspRISCVCPU {
 typedef struct EspRISCVCPUClass {
     /*< private >*/
     RISCVCPUClass parent_class;
+
+    /*< public >*/
     DeviceRealize parent_realize;
     DeviceReset parent_reset;
     bool (*parent_exec_interrupt)(CPUState *cpu, int interrupt_request);
