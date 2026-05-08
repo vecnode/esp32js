@@ -90,7 +90,7 @@ static void Esp32_WLAN_beacon_timer(void *opaque)
         s->beacon_ap=(s->beacon_ap+1)%nb_aps;
       } 
     }
-    timer_mod(s->beacon_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + BEACON_TIME);
+    timer_mod(s->beacon_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + BEACON_TIME);
 }
 
 static void Esp32_WLAN_inject_timer(void *opaque)
@@ -109,7 +109,7 @@ static void Esp32_WLAN_inject_timer(void *opaque)
     if (s->inject_queue_size > 0) {
         // there are more packets... schedule
         // the timer for sending them as well
-        timer_mod(s->inject_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + INTER_FRAME_TIME);
+        timer_mod(s->inject_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + INTER_FRAME_TIME);
     } else {
         // we wait until a new packet schedules
         // us again
@@ -305,7 +305,7 @@ void Esp32_WLAN_insert_frame(Esp32WifiState *s, struct mac80211_frame *frame)
     insertCRC(frame);
     if(DEBUG) {
         ANSI_FG_HCOLOR(GREEN);
-        printf("---------------\n>IN Send Frame type:%d subtype:%d channel:%d ap_state:%d  time:%ld \n",frame->frame_control.type,frame->frame_control.sub_type,esp32_wifi_channel,s->ap_state,(unsigned long) qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+        printf("---------------\n>IN Send Frame type:%d subtype:%d channel:%d ap_state:%d  time:%ld \n",frame->frame_control.type,frame->frame_control.sub_type,esp32_wifi_channel,s->ap_state,(unsigned long) qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         ANSI_DEFAULT();
     }
     infoprint(frame);
@@ -325,7 +325,7 @@ void Esp32_WLAN_insert_frame(Esp32WifiState *s, struct mac80211_frame *frame)
         // running currently, let's schedule
         // one run...
         s->inject_timer_running = 1;
-        timer_mod(s->inject_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + INTER_FRAME_TIME);
+        timer_mod(s->inject_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + INTER_FRAME_TIME);
     }
 
 }
@@ -473,7 +473,7 @@ static ssize_t Esp32_WLAN_receive(NetClientState *ncs,
           if(memcmp(&buf[0],s->macaddr,6)) return -1;
 
           Esp32_WLAN_Set_Packet_Status(ESP32_PHYA_ACK);
-          timer_mod_anticipate(s->wait_ack_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+          timer_mod_anticipate(s->wait_ack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 
           Esp32_WLAN_init_ap_frame(s, frame); 
           memcpy(frame->destination_address, &buf[0], 6);
@@ -527,16 +527,16 @@ void Esp32_WLAN_setup_ap(DeviceState *dev,Esp32WifiState *s) {
 
     Esp32_WLAN_reset_ap(s);
 
-    s->beacon_timer = timer_new_ns(QEMU_CLOCK_REALTIME, Esp32_WLAN_beacon_timer, s);
-    timer_mod(s->beacon_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME)+BEACON_TIME);
+    s->beacon_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, Esp32_WLAN_beacon_timer, s);
+    timer_mod(s->beacon_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)+BEACON_TIME);
 
     // setup the timer but only schedule
     // it when necessary...
-    s->inject_timer = timer_new_ns(QEMU_CLOCK_REALTIME, Esp32_WLAN_inject_timer, s);
+    s->inject_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, Esp32_WLAN_inject_timer, s);
 
-    s->wait_ack_timer = timer_new_ns(QEMU_CLOCK_REALTIME, Esp32_WLAN_Wait_ACk_timer, s);
+    s->wait_ack_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, Esp32_WLAN_Wait_ACk_timer, s);
 
-    s->nic = qemu_new_nic(&net_info, &s->conf, object_get_typename(OBJECT(s)), dev->id, s);
+    s->nic = qemu_new_nic(&net_info, &s->conf, object_get_typename(OBJECT(s)), dev->id, &dev->mem_reentrancy_guard, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->macaddr);
 }
 
@@ -571,7 +571,7 @@ void Esp32_WLAN_handle_frame(Esp32WifiState *s, struct mac80211_frame *frame)
         if((ENABLE_BEACON)||!((frame->frame_control.type == IEEE80211_TYPE_MGT)&&(frame->frame_control.sub_type == IEEE80211_TYPE_MGT_SUBTYPE_BEACON))){
             ANSI_FG_HCOLOR(RED);
             printf("-------------------------\n<OUT Handle Frame type:%d subtype:%d channel:%d ap_state:%d time:%ld \n",frame->frame_control.type,
-                         frame->frame_control.sub_type,esp32_wifi_channel,s->ap_state,(unsigned long)  qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+                         frame->frame_control.sub_type,esp32_wifi_channel,s->ap_state,(unsigned long)  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
             ANSI_DEFAULT();
         }
     }
@@ -640,7 +640,7 @@ void Esp32_WLAN_handle_frame(Esp32WifiState *s, struct mac80211_frame *frame)
                 //if destination is not broadcast wait for ack 
                 if(memcmp(&ethernet_frame[0],BROADCAST,6)){ 
                    Esp32_WLAN_Set_Packet_Status(ESP32_PHYA_NACK);
-                   timer_mod(s->wait_ack_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + WAIT_ACK_TIMEOUT);
+                   timer_mod(s->wait_ack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WAIT_ACK_TIMEOUT);
                    return;
                 }
                 break;

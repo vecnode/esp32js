@@ -96,16 +96,11 @@ XtensaCPU *xtensa_sim_common_init(MachineState *machine)
 void xtensa_sim_load_kernel(XtensaCPU *cpu, MachineState *machine)
 {
     const char *kernel_filename = machine->kernel_filename;
-#if TARGET_BIG_ENDIAN
-    int big_endian = true;
-#else
-    int big_endian = false;
-#endif
 
     if (kernel_filename) {
         uint64_t elf_entry;
         int success = load_elf(kernel_filename, NULL, translate_phys_addr, cpu,
-                               &elf_entry, NULL, NULL, NULL, big_endian,
+                               &elf_entry, NULL, NULL, NULL, TARGET_BIG_ENDIAN,
                                EM_XTENSA, 0, 0);
 
         if (success > 0) {
@@ -124,7 +119,7 @@ static void xtensa_sim_init(MachineState *machine)
 static void xtensa_sim_machine_init(MachineClass *mc)
 {
     mc->desc = "sim machine (" XTENSA_DEFAULT_CPU_MODEL ")";
-//    mc->is_default = true;
+    mc->is_default = true;
     mc->init = xtensa_sim_init;
     mc->max_cpus = 4;
     mc->no_serial = 1;

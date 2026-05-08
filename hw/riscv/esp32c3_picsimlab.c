@@ -27,6 +27,7 @@
 #include "sysemu/runstate.h"
 #include "sysemu/reset.h"
 #include "net/net.h"
+#include "elf.h"
 #include "hw/misc/esp32c3_reg.h"
 #include "hw/misc/esp32c3_rtc_cntl.h"
 #include "hw/misc/esp32c3_cache.h"
@@ -48,6 +49,7 @@
 #include "hw/misc/esp32c3_jtag.h"
 #include "hw/dma/esp32c3_gdma.h"
 #include "hw/display/esp_rgb.h"
+#include "hw/net/can/esp32c3_twai.h"
 #include "hw/misc/esp32c3_iomux.h"
 #include "hw/misc/esp32c3_saradc.h"
 #include "hw/misc/esp32c3_ledc.h"
@@ -106,6 +108,7 @@ struct Esp32C3MachineState {
     ESP32C3RtcCntlState rtccntl;
     ESP32C3UsbJtagState jtag;
     ESPRgbState rgb;
+    Esp32C3TWAIState twai;
     Esp32C3IomuxState iomux;
     Esp32c3SarAdcState saradc;
     Esp32C3LEDCState ledc;
@@ -310,7 +313,7 @@ void qemu_picsimlab_set_pin(int pin,int value)
    else{
       qemu_irq_lower (pin_irq[pin]);
    }
-   //bql_unlock ();
+   //qemu_mutex_unlock_iothread ();
 }
 
 void qemu_picsimlab_set_apin(int chn,int value)
@@ -490,6 +493,7 @@ static void esp32c3_init_spi_flash(Esp32C3MachineState *ms, BlockBackend* blk)
     /* Create the SPI flash model */
     DeviceState *flash_dev = qdev_new(flash_model);
     qdev_prop_set_drive(flash_dev, "drive", blk);
+    qdev_prop_set_uint8(flash_dev, "cs", 1);
 
     /* Realize the SPI flash, its "drive" (blk) property must already be set! */
     qdev_realize(flash_dev, spi_bus, &error_fatal);
@@ -502,52 +506,80 @@ static void esp32c3_add_unimp_device(MemoryRegion *dest, const char* name, hwadd
     create_unimplemented_device_default_value(name, dport_base_addr, size, default_value);
 }
 
+/*
 static void esp32c3_init_openeth(Esp32C3MachineState *ms)
 {
-    
+    MemoryRegion* mr = NULL;
     SysBusDevice* sbd = NULL;
+
     MemoryRegion* sys_mem = get_system_memory();
-    for(int i=0;i<nb_nics;i++) {
-        const char* type_openeth = "open_eth";
-        NICInfo *nd = &nd_table[i];
-        if (nd->used && nd->model && strcmp(nd->model, type_openeth) == 0)
-        {
-            const char* type_openeth = "open_eth";
-            /* Create a new OpenCores Ethernet component */
-            DeviceState *open_eth_dev = qdev_new(type_openeth);
-            ms->eth = open_eth_dev;
-            qdev_set_nic_properties(open_eth_dev, nd);
-            sbd = SYS_BUS_DEVICE(open_eth_dev);
-            sysbus_realize(sbd, &error_fatal);
 
-            /* OpenCores Ethernet has two memory regions: one for registers and one for descriptors,
-             * we need to provide one I/O range for each of them */
-            memory_region_add_subregion_overlap(sys_mem, DR_REG_EMAC_BASE, sysbus_mmio_get_region(sbd, 0), 0);
-            memory_region_add_subregion_overlap(sys_mem, DR_REG_EMAC_BASE + 0x400, sysbus_mmio_get_region(sbd, 1), 0);
+    // Create a new OpenCores Ethernet component 
+    DeviceState* open_eth_dev = qemu_create_nic_device("open_eth", true, NULL);
+    if (!open_eth_dev) {
+        return;
+    }
 
-            sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_ETH_MAC_INTR_SOURCE));
-        }
+    ms->eth = open_eth_dev;
 
-        if (nd->used && nd->model && strcmp(nd->model, TYPE_ESP32C3_WIFI) == 0) {
-            
+    sbd = SYS_BUS_DEVICE(open_eth_dev);
+    sysbus_realize(sbd, &error_fatal);
+
+    // OpenCores Ethernet has two memory regions: one for registers and one for descriptors,
+    //     we need to provide one I/O range for each of them 
+    mr = sysbus_mmio_get_region(sbd, 0);
+    memory_region_add_subregion_overlap(sys_mem, DR_REG_EMAC_BASE, mr, 0);
+    mr = sysbus_mmio_get_region(sbd, 1);
+    memory_region_add_subregion_overlap(sys_mem, DR_REG_EMAC_BASE + 0x400, mr, 0);
+
+    sysbus_connect_irq(sbd, 0,
+                        qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_ETH_MAC_INTR_SOURCE));
+
+}
+*/
+
+
+static void esp32c3_init_openeth(Esp32C3MachineState *ms)
+{
+    SysBusDevice *sbd;
+    MemoryRegion* sys_mem = get_system_memory();
+    
+	const char* type_openeth = "open_eth";
+	NICInfo *nd = qemu_find_nic_info(type_openeth, false, NULL);
+	if(nd!=NULL) {
+        hwaddr reg_base = DR_REG_EMAC_BASE;
+        hwaddr desc_base = reg_base + 0x400;
+        qemu_irq irq = qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_ETH_MAC_INTR_SOURCE);
+		DeviceState* open_eth_dev = qdev_new(type_openeth);
+        ms->eth = open_eth_dev;
+        qdev_set_nic_properties(open_eth_dev, nd);
+        sbd = SYS_BUS_DEVICE(open_eth_dev);
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        sysbus_connect_irq(sbd, 0, irq);
+        memory_region_add_subregion(sys_mem, reg_base, sysbus_mmio_get_region(sbd, 0));
+        memory_region_add_subregion(sys_mem, desc_base, sysbus_mmio_get_region(sbd, 1));
+	}
+	nd = qemu_find_nic_info(TYPE_ESP32C3_WIFI, false, NULL);
+	if(nd!=NULL) {
             //get macaddres from efuse file
             device_cold_reset(DEVICE(&ms->efuse));
-            char * mptr = (char *)&ms->efuse.efuses.rd_mac_spi_sys_0;
+            char * mptr = (char *)&ms->efuse.parent.efuses.blocks.rd_mac_spi_sys_0;
             for(int i=0; i < 6 ; i++){
-                ms->wifi.macaddr[i]=mptr[(5-i)];
+                ms->wifi.macaddr[i]=mptr[5-i];
             }
+            
             qdev_set_nic_properties(DEVICE(&ms->wifi), nd);
             sbd = SYS_BUS_DEVICE(DEVICE(&ms->wifi));
             sysbus_realize_and_unref(sbd, &error_fatal);
-
+            
             MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->wifi), 0);
             memory_region_add_subregion_overlap(sys_mem, DR_REG_WIFI_BASE, mr, 0);
-
+            
             sysbus_connect_irq(SYS_BUS_DEVICE(&ms->wifi), 0,
                            qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_WIFI_MAC_INTR_SOURCE));
-        } 
     }
 }
+
 
 static void esp32c3_init_i2c(Esp32C3MachineState *ms)
 {
@@ -562,6 +594,64 @@ static void esp32c3_init_i2c(Esp32C3MachineState *ms)
     I2CBus* i2c_bus = I2C_BUS(qdev_get_child_bus(i2c_master, "i2c"));
     i2c_slave_create_simple(i2c_bus, "picsimlab_i2c", 0x00);
 
+}
+
+static void esp32c3_load_firmware(MachineState *machine)
+{
+    Esp32C3MachineState *ms = ESP32C3_MACHINE(machine);
+    const char *bios_filename = NULL;
+
+    if (machine->firmware) {
+        bios_filename = machine->firmware;
+    }
+
+    if (machine->kernel_filename) {
+        if (bios_filename) {
+            qemu_log("Warning: both -bios and -kernel arguments specified. Only loading the the -kernel file.\n");
+        }
+        bios_filename = machine->kernel_filename;
+    }
+
+    if (bios_filename) {
+        /* Since EspRISCVCPU doens't have a RISCVHartArrayState field, let's bake one on the stack. It will only be
+         * used to get the type of the RISC-V CPU (32 or 64 bits) in `riscv_load_kernel` */
+        RISCVHartArrayState hart = {
+            .harts = &ms->soc.parent_obj,
+            .num_harts = 1,
+        };
+
+        /* The function `riscv_load_kernel` won't load the ELF file at its entry point, so we have to look
+         * for the ELF entry point manually here */
+        uint64_t elf_entry = ESP32C3_RESET_ADDRESS;
+
+        /* The entry point address should be populated regardless of the return value */
+        load_elf_ram_sym(bios_filename, NULL, NULL, NULL,
+                        &elf_entry, NULL, NULL, NULL, 0,
+                        EM_RISCV, 1, 0, NULL, false, NULL);
+
+        /* On failure, riscv_load_kernel exits the program */
+        qemu_log("Loading kernel at address 0x%08" PRIx64 "\n", elf_entry);
+        riscv_load_kernel(machine, &hart, elf_entry, false, NULL);
+        if (elf_entry != ESP32C3_RESET_ADDRESS) {
+            qdev_prop_set_uint64(DEVICE(&ms->soc), "resetvec", elf_entry);
+        }
+    } else {
+        /* Open and load the "bios", which is the ROM binary, also named "first stage bootloader" */
+        char *rom_binary = qemu_find_file(QEMU_FILE_TYPE_BIOS, "esp32c3-rom.bin");
+        if (rom_binary == NULL) {
+            error_report("Error: -bios argument not set, and ROM code binary not found (1)");
+            exit(1);
+        }
+
+        /* Load ROM file at the reset address */
+        int size = load_image_targphys_as(rom_binary, ESP32C3_RESET_ADDRESS, 0x60000, CPU(&ms->soc)->as);
+        if (size < 0) {
+            error_report("Error: could not load ROM binary '%s'", rom_binary);
+            exit(1);
+        }
+
+        g_free(rom_binary);
+    }
 }
 
 
@@ -620,6 +710,8 @@ static void esp32c3_machine_init(MachineState *machine)
     memory_region_init_ram(rtcram, NULL, "esp32c3.rtcram", memmap[ESP32C3_MEMREGION_RTCFAST].size, &error_fatal);
     memory_region_add_subregion(sys_mem, memmap[ESP32C3_MEMREGION_RTCFAST].base, rtcram);
 
+    esp32c3_load_firmware(machine);
+
     qdev_realize(DEVICE(&ms->soc), NULL, &error_fatal);
 
     memory_region_init_io(&ms->iomem, OBJECT(&ms->soc), &esp32c3_io_ops,
@@ -664,6 +756,7 @@ static void esp32c3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "rtccntl", &ms->rtccntl, TYPE_ESP32C3_RTC_CNTL);
     object_initialize_child(OBJECT(machine), "jtag", &ms->jtag, TYPE_ESP32C3_JTAG);
     object_initialize_child(OBJECT(machine), "rgb", &ms->rgb, TYPE_ESP_RGB);
+    object_initialize_child(OBJECT(machine), "twai", &ms->twai, TYPE_ESP32C3_TWAI);
     object_initialize_child(OBJECT(machine), "iomux", &ms->iomux, TYPE_ESP32C3_IOMUX);
     object_initialize_child(OBJECT(machine), "saradc", &ms->saradc, TYPE_ESP32C3_SARADC);
     object_initialize_child(OBJECT(machine), "ledc", &ms->ledc, TYPE_ESP32C3_LEDC);
@@ -674,10 +767,9 @@ static void esp32c3_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "i2c", &ms->i2c, TYPE_ESP32_I2C);
     ms->i2c.model = I2C_MODEL_ESP32C3;
 
-    for(int i=0;i<nb_nics;i++)
-        if (nd_table[i].used && nd_table[i].model && strcmp(nd_table[i].model, TYPE_ESP32C3_WIFI) == 0){
-            object_initialize_child(OBJECT(machine), "wifi", &ms->wifi, TYPE_ESP32_WIFI);
-        }
+    if(qemu_find_nic_info(TYPE_ESP32C3_WIFI, false, NULL)!=NULL)
+	    object_initialize_child(OBJECT(machine), "wifi", &ms->wifi, TYPE_ESP32_WIFI); 
+    
 
     /* Realize all the I/O peripherals we depend on */
 
@@ -697,15 +789,6 @@ static void esp32c3_machine_init(MachineState *machine)
             qemu_irq cpu_input = qdev_get_gpio_in_named(DEVICE(&ms->soc), ESP_CPU_IRQ_LINES_NAME, i);
             qdev_connect_gpio_out_named(intmatrix_dev, ESP32C3_INT_MATRIX_OUTPUT_NAME, i, cpu_input);
         }
-    }
-
-    /* eFuses realization */
-    {
-        sysbus_realize(SYS_BUS_DEVICE(&ms->efuse), &error_fatal);
-        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->efuse), 0);
-        memory_region_add_subregion_overlap(sys_mem, DR_REG_EFUSE_BASE, mr, 0);
-        sysbus_connect_irq(SYS_BUS_DEVICE(&ms->efuse), 0,
-                       qdev_get_gpio_in(intmatrix_dev, ETS_EFUSE_INTR_SOURCE));
     }
 
     /* Initialize OpenCores Ethernet controller now sicne it requires the interrupt matrix */
@@ -778,6 +861,15 @@ static void esp32c3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, ms->cache.icache_base, &ms->cache.icache, 0);
     }
 
+    /* eFuses realization */
+    {
+        sysbus_realize(SYS_BUS_DEVICE(&ms->efuse), &error_fatal);
+        MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->efuse), 0);
+        memory_region_add_subregion_overlap(sys_mem, DR_REG_EFUSE_BASE, mr, 0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ms->efuse), 0,
+                       qdev_get_gpio_in(intmatrix_dev, ETS_EFUSE_INTR_SOURCE));
+    }
+
     /* System clock realization */
     {
         sysbus_realize(SYS_BUS_DEVICE(&ms->clock), &error_fatal);
@@ -824,7 +916,7 @@ static void esp32c3_machine_init(MachineState *machine)
         sysbus_realize(SYS_BUS_DEVICE(&ms->systimer), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->systimer), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTIMER_BASE, mr, 0);
-        for (int i = 0; i < ESP32C3_SYSTIMER_IRQ_COUNT; i++) {
+        for (int i = 0; i < ESP_SYSTIMER_IRQ_COUNT; i++) {
             sysbus_connect_irq(SYS_BUS_DEVICE(&ms->systimer), i,
                            qdev_get_gpio_in(intmatrix_dev, ETS_SYSTIMER_TARGET0_EDGE_INTR_SOURCE + i));
         }
@@ -836,17 +928,19 @@ static void esp32c3_machine_init(MachineState *machine)
         sysbus_realize(SYS_BUS_DEVICE(&ms->gdma), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->gdma), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_GDMA_BASE, mr, 0);
-        /* Connect the IRQs to the Interrupt Matrix */
+        /* On the ESP32-C3, both IN and OUT channels are connected to the same Connect the IRQs to the Interrupt Matrix */
         for (int i = 0; i < ESP32C3_GDMA_CHANNEL_COUNT; i++) {
-            sysbus_connect_irq(SYS_BUS_DEVICE(&ms->gdma), i,
-                               qdev_get_gpio_in(intmatrix_dev, ETS_DMA_CH0_INTR_SOURCE + i));
+            qdev_connect_gpio_out_named(DEVICE(&ms->gdma), ESP_GDMA_IRQ_IN_NAME, i,
+                                        qdev_get_gpio_in(intmatrix_dev, ETS_DMA_CH0_INTR_SOURCE + i));
+            qdev_connect_gpio_out_named(DEVICE(&ms->gdma), ESP_GDMA_IRQ_OUT_NAME, i,
+                                        qdev_get_gpio_in(intmatrix_dev, ETS_DMA_CH0_INTR_SOURCE + i));
         }
 
     }
 
     /* SHA realization */
     {
-        ms->sha.gdma = &ms->gdma;
+        ms->sha.parent.gdma = ESP_GDMA(&ms->gdma);
         sysbus_realize(SYS_BUS_DEVICE(&ms->sha), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->sha), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SHA_BASE, mr, 0);
@@ -856,7 +950,7 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* AES realization */
     {
-        ms->aes.gdma = &ms->gdma;
+        ms->aes.parent.gdma = ESP_GDMA(&ms->gdma);
         sysbus_realize(SYS_BUS_DEVICE(&ms->aes), &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->aes), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_AES_BASE, mr, 0);
@@ -875,7 +969,7 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* HMAC realization */
     {
-        ms->hmac.efuse = &ms->efuse;
+        ms->hmac.parent.efuse = ESP_EFUSE(&ms->efuse);
         qdev_realize(DEVICE(&ms->hmac), &ms->periph_bus, &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->hmac), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_HMAC_BASE, mr, 0);
@@ -883,10 +977,10 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* Digital Signature realization */
     {
-        ms->ds.hmac = &ms->hmac;
-        ms->ds.aes = &ms->aes;
-        ms->ds.rsa = &ms->rsa;
-        ms->ds.sha = &ms->sha;
+        ms->ds.parent.hmac = ESP_HMAC(&ms->hmac);
+        ms->ds.parent.aes = ESP_AES(&ms->aes);
+        ms->ds.parent.rsa = ESP_RSA(&ms->rsa);
+        ms->ds.parent.sha = ESP_SHA(&ms->sha);
         qdev_realize(DEVICE(&ms->ds), &ms->periph_bus, &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->ds), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_DIGITAL_SIGNATURE_BASE, mr, 0);
@@ -894,7 +988,7 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* XTS-AES realization */
     {
-        ms->xts_aes.efuse = &ms->efuse;
+        ms->xts_aes.efuse = ESP_EFUSE(&ms->efuse);
         ms->xts_aes.clock = &ms->clock;
         qdev_realize(DEVICE(&ms->xts_aes), &ms->periph_bus, &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->xts_aes), 0);
@@ -910,6 +1004,13 @@ static void esp32c3_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(sys_mem, DR_REG_FRAMEBUF_BASE, mr, 0);
         memory_region_add_subregion_overlap(sys_mem, esp32c3_memmap[ESP32C3_MEMREGION_FRAMEBUF].base, &ms->rgb.vram, 0);
     }
+
+    /* TWAI peripheral realization */
+    sysbus_realize(SYS_BUS_DEVICE(&ms->twai), &error_fatal);
+    MemoryRegion *twai_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ms->twai), 0);
+    memory_region_add_subregion_overlap(sys_mem, DR_REG_TWAI_BASE, twai_mr, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ms->twai), 0,
+                       qdev_get_gpio_in(DEVICE(&ms->intmatrix), ETS_TWAI_INTR_SOURCE));
 
     /* SARADC realization */
     {
@@ -989,22 +1090,6 @@ static void esp32c3_machine_init(MachineState *machine)
 
     /* Register reset function so that it is called when `system_reset` is invoked in QEMU monitor */
     //qemu_register_reset(esp32c3_reset_request, ms);
-
-    /* Open and load the "bios", which is the ROM binary, also named "first stage bootloader" */
-    char *rom_binary = qemu_find_file(QEMU_FILE_TYPE_BIOS, "esp32c3-rom.bin");
-    if (rom_binary == NULL) {
-        error_report("Error: -bios argument not set, and ROM code binary not found (1)");
-        exit(1);
-    }
-
-    /* Load ROM file at the reset address */
-    int size = load_image_targphys_as(rom_binary, ESP32C3_RESET_ADDRESS, 0x60000, CPU(&ms->soc)->as);
-    if (size < 0) {
-        error_report("Error: could not load ROM binary '%s'", rom_binary);
-        exit(1);
-    }
-
-    g_free(rom_binary);
 
 
     //PICSimLab gpio map

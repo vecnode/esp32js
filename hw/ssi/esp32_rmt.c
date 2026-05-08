@@ -188,9 +188,9 @@ static const MemoryRegionOps esp32_rmt_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32_rmt_reset(DeviceState *dev)
+static void esp32_rmt_reset_enter(Object *obj, ResetType type)
 {
-    Esp32RmtState *s = ESP32_RMT(dev);
+    Esp32RmtState *s = ESP32_RMT(obj);
     s->int_raw=0;
     s->sent=0;
     s->int_en=0;
@@ -225,11 +225,13 @@ static Property esp32_rmt_properties[] = {
 
 static void esp32_rmt_class_init(ObjectClass *klass, void *data)
 {
+    ResettablePhases rp;
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    dc->reset = esp32_rmt_reset;
     dc->realize = esp32_rmt_realize;
     device_class_set_props(dc, esp32_rmt_properties);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    resettable_class_set_parent_phases(rc, esp32_rmt_reset_enter, NULL, NULL, &rp);
 }
 
 static const TypeInfo esp32_rmt_info = {

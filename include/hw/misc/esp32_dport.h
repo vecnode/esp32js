@@ -3,7 +3,6 @@
 #include "hw/hw.h"
 #include "hw/registerfields.h"
 #include "hw/sysbus.h"
-#include "hw/misc/esp32_reg.h"
 #include "sysemu/block-backend.h"
 #include "hw/misc/esp32_flash_enc.h"
 
@@ -59,6 +58,7 @@ typedef struct Esp32DportState {
     bool has_psram;
     int cpu_count;
     Esp32CacheState cache_state[ESP32_CPU_COUNT];
+    MemoryRegion psram;         /* Shared between the CPUs: the actual memory region for PSRAM */
     BlockBackend *flash_blk;
     qemu_irq appcpu_stall_req;
     qemu_irq appcpu_reset_req;

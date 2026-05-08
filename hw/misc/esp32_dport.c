@@ -366,9 +366,9 @@ static const MemoryRegionOps esp32_cache_ill_trap_ops = {
     .write = esp32_cache_ill_write,
 };
 
-static void esp32_dport_reset(DeviceState *dev)
+static void esp32_dport_reset_hold(Object *obj, ResetType type)
 {
-    Esp32DportState *s = ESP32_DPORT(dev);
+    Esp32DportState *s = ESP32_DPORT(obj);
 
     s->appcpu_boot_addr = 0;
     s->appcpu_clkgate_state = false;
@@ -388,7 +388,8 @@ static void esp32_dport_realize(DeviceState *dev, Error **errp)
     s->cpu_count = ms->smp.cpus;
 }
 
-static void esp32_cache_init_region(Esp32CacheState *cs,
+static void esp32_cache_init_region(Esp32DportState *ds,
+                                    Esp32CacheState *cs,
                                     Esp32CacheRegionState *crs,
                                     Esp32CacheRegionType type,
                                     const char* name, hwaddr base,
@@ -401,8 +402,8 @@ static void esp32_cache_init_region(Esp32CacheState *cs,
     crs->illegal_access_retval = illegal_access_retval;
     snprintf(desc, sizeof(desc), "cpu%d-%s", cs->core_id, name);
     if (type == ESP32_DCACHE_PSRAM) {
-        memory_region_init_ram(&crs->mem, OBJECT(cs->dport), desc,
-                               ESP32_CACHE_REGION_SIZE, &error_abort);
+        memory_region_init_alias(&crs->mem, OBJECT(cs->dport), desc,
+                                 &ds->psram, 0, ESP32_CACHE_REGION_SIZE);
     } else {
         memory_region_init_rom_device(&crs->mem, OBJECT(cs->dport),
                                     &esp32_cache_ops, crs,
@@ -424,16 +425,18 @@ static void esp32_dport_init(Object *obj)
                           TYPE_ESP32_DPORT, ESP32_DPORT_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
 
+    memory_region_init_ram(&s->psram, obj, "psram", ESP32_CACHE_REGION_SIZE, &error_fatal);
+
     for (int i = 0; i < ESP32_CPU_COUNT; ++i) {
         Esp32CacheState* cs = &s->cache_state[i];
         cs->core_id = i;
         cs->dport = s;
-        esp32_cache_init_region(cs, &cs->drom0, ESP32_DCACHE_FLASH, "drom0",
+        esp32_cache_init_region(s, cs, &cs->drom0, ESP32_DCACHE_FLASH, "drom0",
                                 0x3F400000, 0xbaadbaad);
-        esp32_cache_init_region(cs, &cs->iram0, ESP32_ICACHE_FLASH, "iram0",
+        esp32_cache_init_region(s, cs, &cs->iram0, ESP32_ICACHE_FLASH, "iram0",
                                 0x40000000, 0x00000000);
-        esp32_cache_init_region(cs, &cs->dram1, ESP32_DCACHE_PSRAM, "dram1",
-                                0x3F800000, 0xbaadbaad);
+        esp32_cache_init_region(s, cs, &cs->dram1, ESP32_DCACHE_PSRAM, "dram1",
+                                    0x3F800000, 0xbaadbaad);
     }
 
     qdev_init_gpio_out_named(DEVICE(sbd), &s->appcpu_stall_req, ESP32_DPORT_APPCPU_STALL_GPIO, 1);
@@ -453,8 +456,9 @@ static Property esp32_dport_properties[] = {
 static void esp32_dport_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = esp32_dport_reset;
+    rc->phases.hold = esp32_dport_reset_hold;
     dc->realize = esp32_dport_realize;
     device_class_set_props(dc, esp32_dport_properties);
 }

@@ -258,16 +258,24 @@ static const MemoryRegionOps gpio_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32_gpio_reset(DeviceState *dev) {}
+static void esp32_gpio_reset_hold(Object *obj, ResetType type)
+{
+}
 
-static void esp32_gpio_realize(DeviceState *dev, Error **errp) {}
+static void esp32_gpio_realize(DeviceState *dev, Error **errp)
+{
+}
 
-static void esp32_gpio_init(Object *obj) {
+static void esp32_gpio_init(Object *obj)
+{
     Esp32GpioState *s = ESP32_GPIO(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &gpio_ops, s, TYPE_ESP32_GPIO,
-                          0x1000);
+    /* Set the default value for the strap_mode property */
+    object_property_set_int(obj, "strap_mode", ESP32_STRAP_MODE_FLASH_BOOT, &error_fatal);
+
+    memory_region_init_io(&s->iomem, obj, &gpio_ops, s,
+                          TYPE_ESP32_GPIO, 0x1000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(DEVICE(s), &s->irq, SYSBUS_DEVICE_GPIO_IRQ, 1);
@@ -280,15 +288,18 @@ static void esp32_gpio_init(Object *obj) {
 }
 
 static Property esp32_gpio_properties[] = {
-    DEFINE_PROP_UINT32("strap_mode", Esp32GpioState, strap_mode,
-                       ESP32_STRAP_MODE_FLASH_BOOT),
+    /* The strap_mode needs to be explicitly set in the instance init, thus, set
+     * the default value to 0. */
+    DEFINE_PROP_UINT32("strap_mode", Esp32GpioState, strap_mode, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void esp32_gpio_class_init(ObjectClass *klass, void *data) {
+static void esp32_gpio_class_init(ObjectClass *klass, void *data)
+{
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = esp32_gpio_reset;
+    rc->phases.hold = esp32_gpio_reset_hold;
     dc->realize = esp32_gpio_realize;
     device_class_set_props(dc, esp32_gpio_properties);
 }
@@ -299,9 +310,11 @@ static const TypeInfo esp32_gpio_info = {
     .instance_size = sizeof(Esp32GpioState),
     .instance_init = esp32_gpio_init,
     .class_init = esp32_gpio_class_init,
-    .class_size = sizeof(Esp32GpioClass)};
+    .class_size = sizeof(Esp32GpioClass),
+};
 
-static void esp32_gpio_register_types(void) {
+static void esp32_gpio_register_types(void)
+{
     type_register_static(&esp32_gpio_info);
 }
 

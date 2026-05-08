@@ -119,13 +119,13 @@ static void esp32c3_uart_write(void *opaque, hwaddr addr,
     }
 }
 
-static void esp32c3_uart_reset(DeviceState *dev)
+static void esp32c3_uart_reset_enter(Object *obj, ResetType type)
 {
     /* Nothing special to do at the moment here, call the parent reset */
-    ESP32C3UARTClass* esp32c3_class = ESP32C3_UART_GET_CLASS(dev);
-    ESP32C3UARTState *s = ESP32C3_UART(dev);
+    //ESP32C3UARTClass* esp32c3_class = ESP32C3_UART_GET_CLASS(obj);
+    ESP32C3UARTState *s = ESP32C3_UART(obj);
 
-    esp32c3_class->parent_reset(dev);
+    //esp32c3_class->parent_reset(DEVICE(obj));
 
     s->parent.reg[R_ESP32C3_UART_CLK_CONF] = 0x03700000;
 }
@@ -152,6 +152,7 @@ static void esp32c3_uart_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     ESP32C3UARTClass* esp32c3 = ESP32C3_UART_CLASS(klass);
     ESP32UARTClass* esp32 = ESP32_UART_CLASS(klass);
+    ResettablePhases rp;
 
     /* Set our class' parent_realize field to the current realize function, set by the
      * parent class initializer.
@@ -160,7 +161,8 @@ static void esp32c3_uart_class_init(ObjectClass *klass, void *data)
     device_class_set_parent_realize(dc, esp32c3_uart_realize, &esp32c3->parent_realize);
 
     /* Let's do the same thing for the reset function */
-    device_class_set_parent_reset(dc, esp32c3_uart_reset, &esp32c3->parent_reset);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    resettable_class_set_parent_phases(rc,esp32c3_uart_reset_enter, NULL, NULL, &rp);
 
     /* Override the UART operations functions */
     esp32c3->parent_uart_write = esp32->uart_write;

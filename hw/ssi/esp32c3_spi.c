@@ -145,13 +145,15 @@ static void esp32c3_spi_dummy_cycles(ESP32C3SpiState *s, uint32_t dummy_bytes) {
 
 static void esp32c3_spi_perform_transaction(ESP32C3SpiState *s, ESP32C3SpiTransaction *t)
 {
-    ESP32C3XtsAesClass *xts_aes_class = ESP32C3_XTS_AES_GET_CLASS(s->xts_aes);
-    bool man_enc_enabled = xts_aes_class->is_manual_enc_enabled(s->xts_aes);
+    if (s->xts_aes != NULL)
+    {
+        ESP32C3XtsAesClass *xts_aes_class = ESP32C3_XTS_AES_GET_CLASS(s->xts_aes);
+        bool man_enc_enabled = xts_aes_class->is_manual_enc_enabled(s->xts_aes);
 
-    if (man_enc_enabled && xts_aes_class->is_ciphertext_spi_visible(s->xts_aes) && (t->cmd == CMD_PP)) {
-        xts_aes_class->read_ciphertext(s->xts_aes, t->data, &(t->tx_bytes), &(t->addr), &(t->addr_bytes));
+        if (man_enc_enabled && xts_aes_class->is_ciphertext_spi_visible(s->xts_aes) && (t->cmd == CMD_PP)) {
+            xts_aes_class->read_ciphertext(s->xts_aes, t->data, &(t->tx_bytes), &(t->addr), &(t->addr_bytes));
+        }
     }
-
     qemu_set_irq(s->cs_gpio[0], 0);
     esp32c3_spi_txrx_buffer(s, &t->cmd, t->cmd_bytes, NULL, 0);
     esp32c3_spi_txrx_buffer(s, &t->addr, t->addr_bytes, NULL, 0);
@@ -397,11 +399,6 @@ static void esp32c3_spi_write(void *opaque, hwaddr addr,
 
 }
 
-/* Convert one of the hardware "bitlen" registers to a byte count */
-static inline int bitlen_to_bytes(uint32_t val)
-{
-    return (val + 1 + 7) / 8; /* bitlen registers hold number of bits, minus one */
-}
 
 static const MemoryRegionOps esp32c3_spi_ops = {
     .read =  esp32c3_spi_read,
@@ -409,9 +406,9 @@ static const MemoryRegionOps esp32c3_spi_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32c3_spi_reset(DeviceState *dev)
+static void esp32c3_spi_reset_hold(Object *obj, ResetType type)
 {
-    ESP32C3SpiState *s = ESP32C3_SPI(dev);
+    ESP32C3SpiState *s = ESP32C3_SPI(obj);
     memset(s->data_reg, 0, ESP32C3_SPI_BUF_WORDS * sizeof(uint32_t));
     s->mem_ctrl1 = FIELD_DP32(s->mem_ctrl1, SPI_MEM_CTRL1, CS_HOLD_DLY_RES, 0x3ff);
     s->mem_clock = FIELD_DP32(s->mem_clock, SPI_MEM_CLOCK, CLKCNT_N, 3);
@@ -435,7 +432,7 @@ static void esp32c3_spi_realize(DeviceState *dev, Error **errp)
 
     /* Make sure XTS_AES was set or issue an error */
     if (s->xts_aes == NULL) {
-        error_report("[SPI1] XTS_AES controller must be set!");
+        // error_report("[SPI1] XTS_AES controller must be set!");
     }
 
 }
@@ -450,7 +447,7 @@ static void esp32c3_spi_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     // sysbus_init_irq(sbd, &s->irq);
 
-    esp32c3_spi_reset(DEVICE(s));
+    esp32c3_spi_reset_hold(obj, RESET_TYPE_COLD);
 
     s->spi = ssi_create_bus(DEVICE(s), "spi");
     qdev_init_gpio_out_named(DEVICE(s), &s->cs_gpio[0], SSI_GPIO_CS, ESP32C3_SPI_CS_COUNT);
@@ -463,8 +460,9 @@ static Property esp32c3_spi_properties[] = {
 static void esp32c3_spi_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = esp32c3_spi_reset;
+    rc->phases.hold = esp32c3_spi_reset_hold;
     dc->realize = esp32c3_spi_realize;
     device_class_set_props(dc, esp32c3_spi_properties);
 }

@@ -111,9 +111,9 @@ static void esp32c3_saradc_init(Object *obj)
     memset(s->ADC_values, 0, sizeof(s->ADC_values));
 }
 
-static void esp32c3_saradc_reset(DeviceState * dev)
+static void esp32c3_saradc_reset_enter(Object *obj, ResetType type)
 {
-    Esp32c3SarAdcState * s = ESP32C3_SARADC(dev);
+    Esp32c3SarAdcState * s = ESP32C3_SARADC(obj);
 
     s->int_ena_reg = 0;
     s->int_raw_reg = 0;
@@ -124,8 +124,10 @@ static void esp32c3_saradc_reset(DeviceState * dev)
 
 static void esp32c3_saradc_class_init(ObjectClass * klass, void * data)
 {
-    DeviceClass * dc = DEVICE_CLASS(klass);
-    dc->reset = esp32c3_saradc_reset;
+    ResettablePhases rp;
+    //DeviceClass * dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    resettable_class_set_parent_phases(rc, esp32c3_saradc_reset_enter, NULL, NULL, &rp);
 }
 
 static const TypeInfo esp32c3_saradc_info = {

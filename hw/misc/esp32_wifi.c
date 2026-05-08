@@ -63,7 +63,7 @@ static void esp32_wifi_write(void *opaque, hwaddr addr, uint64_t value,
                 qemu_set_irq(s->irq, 0);
             break;
         case A_WIFI_DMA_OUTLINK:
-            if (value & 0xc0000000) {                        
+            if (value & 0xc0000000) {
                 // do a DMA transfer to the hardware from esp32 memory
                 mac80211_frame frame;
                 dma_list_item item;
@@ -76,6 +76,7 @@ static void esp32_wifi_write(void *opaque, hwaddr addr, uint64_t value,
                 frame.frame_length=item.length;
                 frame.next_frame=0;
                 Esp32_WLAN_handle_frame(s, &frame);
+                set_interrupt(s,0x80);
             }
     }
     s->mem[addr/4]=value;
@@ -87,10 +88,10 @@ static int match_mac_address(uint8_t *a1,uint8_t *a2) {
     return 0;
 }
 // frame from ap to esp32
-void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int signal_strength) {    
+void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int signal_strength) {
     if(s->dma_inlink_address==0) return;
-    uint8_t header[sizeof(wifi_pkt_rx_ctrl_t)+length];
-    memset(header,0,sizeof(header));
+    uint8_t *header=malloc(sizeof(wifi_pkt_rx_ctrl_t)+length);
+    memset(header,0,sizeof(wifi_pkt_rx_ctrl_t)+length);
     wifi_pkt_rx_ctrl_t *pkt=(wifi_pkt_rx_ctrl_t *)header;
     *pkt=(wifi_pkt_rx_ctrl_t){
         .rssi=(signal_strength+(rand()%10)+96),
@@ -100,7 +101,7 @@ void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int si
         .legacy_length=length,
         .noise_floor=-97,
         .channel=esp32_wifi_channel,
-        .timestamp=(qemu_clock_get_ns(QEMU_CLOCK_REALTIME)/1000),
+        .timestamp=(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)/1000),
     };
     // These 4 bits are set if the mac addresses previously stored at 0x40 and 0x48
     // match the destination or bssid addresses in the frame
@@ -125,6 +126,7 @@ void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int si
     address_space_write(&address_space_memory, s->dma_inlink_address, MEMTXATTRS_UNSPECIFIED,&item,4);
     s->dma_inlink_address=item.next;
     set_interrupt(s,0x1000024);
+    free(header);
 }
 
 static const MemoryRegionOps esp32_wifi_ops = {
@@ -132,15 +134,6 @@ static const MemoryRegionOps esp32_wifi_ops = {
     .write = esp32_wifi_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
-
-static void esp32_wifi_reset(DeviceState *dev)
-{
-    Esp32WifiState *s = ESP32_WIFI(dev);
-
-    s->dma_inlink_address=0;
-    memset(s->mem,0,sizeof(s->mem));
-    Esp32_WLAN_reset_ap(s);
-}
 
 static void esp32_wifi_realize(DeviceState *dev, Error **errp)
 {
@@ -154,24 +147,31 @@ static void esp32_wifi_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(sbd, &s->irq);
     memset(s->mem,0,sizeof(s->mem));
     Esp32_WLAN_setup_ap(dev, s);
-    
 }
 static Property esp32_wifi_properties[] = {
     DEFINE_NIC_PROPERTIES(Esp32WifiState, conf),
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static void esp32_wifi_reset_enter(Object *obj, ResetType type)
+{
+    Esp32WifiState *s = ESP32_WIFI(obj);
+    if(s)
+	    s->ap_state=0;
+}
+
 static void esp32_wifi_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-
+    ResettablePhases rp;
     dc->realize = esp32_wifi_realize;
-    dc->reset = esp32_wifi_reset;
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->desc = "Esp32 WiFi";
     device_class_set_props(dc, esp32_wifi_properties);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    resettable_class_set_parent_phases(rc, esp32_wifi_reset_enter, NULL, NULL,
+                                   &rp);
 }
-
 
 static const TypeInfo esp32_wifi_info = {
     .name = TYPE_ESP32_WIFI,

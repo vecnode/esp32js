@@ -328,8 +328,9 @@ static const MemoryRegionOps iomux_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32_iomux_reset(DeviceState *dev) {
-    Esp32IomuxState *s = ESP32_IOMUX(dev);    
+static void esp32_iomux_reset_enter(Object *obj, ResetType type){
+    Esp32IomuxState *s = ESP32_IOMUX(obj);  
+      
     for(int i=0; i < 40; i++){
        s->muxgpios[i]=0x00000800;
     }
@@ -352,9 +353,11 @@ static void esp32_iomux_init(Object *obj) {
 }
 
 static void esp32_iomux_class_init(ObjectClass *klass, void *data) {
+	ResettablePhases rp;
     DeviceClass *dc = DEVICE_CLASS(klass);
-    dc->reset = esp32_iomux_reset;
     dc->realize = esp32_iomux_realize;
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    resettable_class_set_parent_phases(rc, esp32_iomux_reset_enter, NULL, NULL, &rp);
 }
 
 static const TypeInfo esp32_iomux_info = {

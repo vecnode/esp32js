@@ -19,6 +19,7 @@ echo DBG
     --enable-fdt=internal \
     --enable-gcrypt \
     --enable-sdl \
+    --enable-pixman \
     --enable-slirp \
     --enable-stack-protector \
     --prefix=$PWD/install/qemu \

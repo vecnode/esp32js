@@ -74,7 +74,7 @@ void esp32_uart_set_rx_timeout(ESP32UARTState *s)
 }
 
 
-static uint8_t fifo8_peek(Fifo8 *fifo)
+static uint8_t fifo8_peek_(Fifo8 *fifo)
 {
     if (fifo->num == 0) {
         abort();
@@ -238,14 +238,18 @@ static gboolean uart_transmit(void *do_not_use, GIOCondition cond, void *opaque)
     s->tx_watch_handle = 0;
 
     /* drain the fifo instantly, if the char device backend is not connected */
+    /*
     if (!qemu_chr_fe_backend_open(&s->chr)) {
         fifo8_reset(&s->tx_fifo);
         return FALSE;
     }
+    */
 
     while (fifo8_num_used(&s->tx_fifo) > 0) {
-        uint8_t b = fifo8_peek(&s->tx_fifo);
-        /*int r = */qemu_chr_fe_write(&s->chr, &b, 1);
+        uint8_t b = fifo8_peek_(&s->tx_fifo);
+        if (qemu_chr_fe_backend_open(&s->chr)){ 
+          /*int r = */qemu_chr_fe_write(&s->chr, &b, 1);
+        }
         picsimlab_uart_tx_event(s->id, b);
         fifo8_pop(&s->tx_fifo); //don´t wait for uart read when port closed, serial data will be lost 
 /*
@@ -334,9 +338,9 @@ static void uart_rx_timeout_timer_cb(void* opaque)
     esp32_uart_update_irq(s);
 }
 
-static void esp32_uart_reset(DeviceState *dev)
+static void esp32_uart_reset_hold(Object *obj, ResetType type)
 {
-    ESP32UARTState *s = ESP32_UART(dev);
+    ESP32UARTState *s = ESP32_UART(obj);
 
     memset(s->reg, 0, sizeof(s->reg));
     s->reg[R_UART_RXD_CNT] = 0;
@@ -410,12 +414,13 @@ static void esp32_uart_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ESP32UARTClass *class = ESP32_UART_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     /* Populate the virtual attributes and methods here (if any) */
     class->uart_write = uart_write;
     class->uart_read = uart_read;
 
-    dc->reset = esp32_uart_reset;
+    rc->phases.hold = esp32_uart_reset_hold;
     dc->realize = esp32_uart_realize;
     device_class_set_props(dc, esp32_uart_properties);
 }

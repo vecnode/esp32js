@@ -24,6 +24,10 @@ crypto_ss.add(files(
   'rsakey.c',
 ))
 
+if gnutls.found()
+  crypto_ss.add(files('x509-utils.c'))
+endif
+
 if nettle.found()
   crypto_ss.add(nettle, files('hash-nettle.c', 'hmac-nettle.c', 'pbkdf-nettle.c'))
   if hogweed.found()
@@ -46,17 +50,24 @@ endif
 if have_afalg
   crypto_ss.add(if_true: files('afalg.c', 'cipher-afalg.c', 'hash-afalg.c'))
 endif
-crypto_ss.add(when: gnutls, if_true: files('tls-cipher-suites.c'))
 
-util_ss.add(files('sm4.c'))
-util_ss.add(files('aes.c'))
-util_ss.add(files('sha512-internal.c'))
-util_ss.add(files('sha384-internal.c'))
-util_ss.add(files('sha256-internal.c'))
-util_ss.add(files('sha224-internal.c'))
-util_ss.add(files('sha1-internal.c'))
-util_ss.add(files('hmac256-internal.c'))
-util_ss.add(files('init.c'))
+system_ss.add(when: gnutls, if_true: files('tls-cipher-suites.c'))
+
+util_ss.add(files(
+  'aes.c',
+  'clmul.c',
+  'init.c',
+  'sm4.c',
+  'sha512_t-internal.c',
+  'sha512_256-internal.c',
+  'sha512_224-internal.c',
+  'sha512-internal.c',
+  'sha384-internal.c',
+  'sha256-internal.c',
+  'sha224-internal.c',
+  'sha1-internal.c',
+  'hmac256-internal.c',
+))
 if gnutls.found()
   util_ss.add(gnutls)
 endif
@@ -71,4 +82,4 @@ else
   util_ss.add(files('random-platform.c'))
 endif
 
-util_ss.add(when: 'CONFIG_RISCV_ESP32C3', if_true: files('xts.c'))
+util_ss.add(files('xts.c'))

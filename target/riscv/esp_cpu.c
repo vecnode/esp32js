@@ -20,6 +20,9 @@
 #include "sysemu/reset.h"
 #include "esp_cpu.h"
 
+#define BIT_SET(reg, bit)   ((reg) & BIT(bit))
+#define CLEAR_BIT(reg, bit) do { (reg) &= ~BIT(bit); } while(0)
+#define SET_BIT(reg, bit)   do { (reg) |= BIT(bit); } while(0)
 
 /* CSR-related */
 #define ESP_CPU_CSR_PCER_M      0x7E0
@@ -59,9 +62,16 @@ static uint64_t esp_cpu_get_cycles(ESPCPUCycleCounter* cc)
 
     /* If we are not in the first call, calculate the difference */
     if (cc->former_time != 0) {
-        /* Let's say that we have 1 instruction/clock cycle, so 1 instruction/6.25ns */
+        /* The divider is in picoseconds, for a more precise result. It would be possible to simpyl return
+         * cc->cycles = (now * 1000 / cc->divider). However, doing so would prevent a future implementation
+         * of CPU frequency change as the cycles count would go backward as soon as the frequency is higher
+         */
         assert(cc->divider != 0);
-        diff = (now - cc->former_time) / cc->divider;
+        const uint64_t num = (now - cc->former_time) * 1000 + cc->former_rem_cycles;
+        diff = num / cc->divider;
+        /* Store the remaining executed clock cycles that were not taken into account in the division,
+         * they will be added back in the next run */
+        cc->former_rem_cycles = num % cc->divider;
     }
     cc->former_time = now;
     cc->cycles += diff;
@@ -113,33 +123,6 @@ static RISCVException esp_cpu_csr_write(CPURISCVState *env, int csrno, target_ul
 }
 
 
-static RISCVException esp_cpu_write_mstatus(CPURISCVState *env, int csrno, target_ulong val) {
-    EspRISCVCPU *s = esp_cpu_riscv_to_cpu(env);
-    EspRISCVCPUClass *klass = ESP_CPU_GET_CLASS(s);
-
-    const int previous_mie = env->mstatus & MSTATUS_MIE;
-
-    RISCVException excp = klass->parent_mstatus_write(env, csrno, val);
-
-    const int new_mie = env->mstatus & MSTATUS_MIE;
-
-    /* Check if the MIE bit of MSTATUS has just been enabled by the application.
-     * If that's the case, the interrupts are enabled again, notify the interrupt matrix. */
-    if (new_mie && !previous_mie && s->mie_enabled_callback) {
-        s->mie_enabled_callback(s->mie_enabled_opaque);
-    }
-
-    return excp;
-}
-
-
-static void esp_cpu_register_mie_callback(EspRISCVCPU *env, EspRISCVCallback callback, void* opaque)
-{
-    assert(env != NULL);
-    env->mie_enabled_callback = callback;
-    env->mie_enabled_opaque = opaque;
-}
-
 riscv_csr_operations esp_cpu_csr_ops = {
     .predicate = esp_cpu_csr_predicate,
     .read = esp_cpu_csr_read,
@@ -147,18 +130,14 @@ riscv_csr_operations esp_cpu_csr_ops = {
 };
 
 
-/**
- * Checks whether the CPU can accepts interrupts or not
- */
-bool esp_cpu_accept_interrupts(EspRISCVCPU *cpu)
+static void esp_cpu_update_parent_irq(EspRISCVCPU *cpu)
 {
-    /* Get the MIE bit out of the MSTATUS register */
-    CPURISCVState *env = &cpu->parent_obj.env;
-    const bool mie = (riscv_csr_read(env, CSR_MSTATUS) & MSTATUS_MIE) != 0;
-
-    return !cpu->irq_pending && mie;
+    if (cpu->irq_lines != 0) {
+        qemu_irq_raise(cpu->parent_irq);
+    } else {
+        qemu_irq_lower(cpu->parent_irq);
+    }
 }
-
 
 /**
  * Function called when an interrupt is incoming.
@@ -167,14 +146,33 @@ static void esp_cpu_irq_handler(void *opaque, int n, int level)
 {
     EspRISCVCPU *cpu = (EspRISCVCPU*) opaque;
 
-    /* Interrupt incoming if level is not 0, make sure we can receive interrupts */
-    if (level && esp_cpu_accept_interrupts(cpu)) {
-        cpu->irq_pending = true;
-        cpu->irq_cause = n;
-        qemu_irq_raise(cpu->parent_irq);
+    /* Lines go from 1 to 31 included */
+    assert(n <= ESP_CPU_INT_LINES);
+
+    if (n == 0) {
+        return;
     }
+
+    if (level != 0) {
+        SET_BIT(cpu->irq_lines, n);
+    } else {
+        CLEAR_BIT(cpu->irq_lines, n);
+    }
+
+    esp_cpu_update_parent_irq(cpu);
 }
 
+
+static uint32_t esp_cpu_select_irq_cause(EspRISCVCPU *cpu)
+{
+    for (uint32_t i = 1; i <= ESP_CPU_INT_LINES; i++) {
+        if (BIT_SET(cpu->irq_lines, i)) {
+            return i;
+        }
+    }
+
+    return 0;
+}
 
 /**
  * TCG operation called when the CPU has to actually jump to the interrupt handler.
@@ -186,17 +184,17 @@ static bool esp_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
      * replace the most important part for us: the mcause. */
     EspRISCVCPU *cpu = ESP_CPU(cs);
     EspRISCVCPUClass *klass = ESP_CPU_GET_CLASS(cpu);
+    const uint32_t cause = esp_cpu_select_irq_cause(cpu);
+
+    if (cause == 0) {
+        return false;
+    }
 
     const bool accepted = klass->parent_exec_interrupt(cs, interrupt_request);
 
     if (accepted) {
         CPURISCVState *env = &cpu->parent_obj.env;
         const bool vectored = (env->mtvec & 3) == 1;
-        const uint32_t cause = cpu->irq_cause;
-
-        /* IRQ has been acknowledged by the parent CPU, it is not pending anymore */
-        cpu->irq_pending = false;
-        qemu_irq_lower(cpu->parent_irq);
 
         /* Update the mcause and the relevant PC */
         env->mcause = RISCV_EXCP_INT_FLAG | cause;
@@ -205,6 +203,7 @@ static bool esp_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         env->pc = (env->mtvec >> 2 << 2) + (vectored ? cause * 4 : 0);
     }
 
+    /* Similarly, make sure the parent IRQ reflects the current state */
     return accepted;
 }
 
@@ -214,14 +213,13 @@ static bool esp_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
  */
 static void set_misa(CPURISCVState *env, RISCVMXL mxl, uint32_t ext)
 {
-    env->misa_mxl_max = env->misa_mxl = mxl;
     env->misa_ext_mask = env->misa_ext = ext;
 }
 
 static void esp_cpu_reset(void *opaque)
 {
     EspRISCVCPU *cpu = opaque;
-    cpu->irq_pending = 0;
+    cpu->irq_lines = 0;
     qemu_irq_lower(cpu->parent_irq);
     cpu_reset(CPU(cpu));
 }
@@ -242,6 +240,30 @@ static void esp_cpu_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static struct TCGCPUOps tcg_ops = { 0 };
+
+static void esp_cpu_override_tcg_interrupts(Object *obj)
+{
+    EspRISCVCPUClass *klass = ESP_CPU_GET_CLASS(obj);
+    CPUClass *cc = CPU_CLASS(klass);
+    EspRISCVCPUClass *cpuclass = ESP_CPU_CLASS(klass);
+
+    /* The goal of this RISC-V CPU child class is to override the way interrupts are handled.
+     * In theory, it would be enough to override `do_interrupt` function from the CPU's TCGCPUOps
+     * structure, however, in practice, we have to override `riscv_cpu_exec_interrupt` function.
+     * This is due to the fact that the RISC-V implementation doesn't call the `do_interrupt` routine
+     * from its TCGCPUOps routine, but directly calls its `riscv_cpu_do_interrupt` function.
+     * As that structure may be constant, we have to copy it in order to replace one of its field. */
+    memcpy(&tcg_ops, cc->tcg_ops, sizeof(struct TCGCPUOps));
+
+    /* Copy the parent's exec_interrupt function as we will execute it later */
+    cpuclass->parent_exec_interrupt = tcg_ops.cpu_exec_interrupt;
+
+    /* Replace it with our overriden implementation */
+    tcg_ops.cpu_exec_interrupt = esp_cpu_exec_interrupt;
+    cc->tcg_ops = &tcg_ops;
+}
+
 static void esp_cpu_init(Object *obj)
 {
     EspRISCVCPU *s = ESP_CPU(obj);
@@ -252,6 +274,10 @@ static void esp_cpu_init(Object *obj)
     cpu->cfg.ext_zawrs = false;
     /* Zfa extension is enabled by default, but depends on "F" extension which isn't present on C3 */
     cpu->cfg.ext_zfa = false;
+
+    /* Since the TCG operations are now separated from the standard RISC-V CPU, we have to override
+     * the TCG operations in this init function instead of the class init */
+    esp_cpu_override_tcg_interrupts(obj);
 
     /* Initialize the IRQ lines */
     qdev_init_gpio_in_named_with_opaque(DEVICE(s),
@@ -279,12 +305,11 @@ static void esp_cpu_init(Object *obj)
     riscv_set_csr_ops(ESP_CPU_CSR_PCMR_U, &esp_cpu_csr_ops);
     riscv_set_csr_ops(ESP_CPU_CSR_MCYCLE_U, &esp_cpu_csr_ops);
 
-    /* Re-use the macro that checks and casts any generic/parent class to the real child instance */
     s->cc_machine = (ESPCPUCycleCounter) {
-        .divider = 6,   /* 6.25ns per instruction at 160MHz. */
+        .divider = 6250,   /* 6.25ns per instruction at 160MHz. */
     };
     s->cc_user = (ESPCPUCycleCounter) {
-        .divider = 6,   /* Should be using the target configured CPU clock frequency instead. */
+        .divider = 6250,   /* Should be using the target configured CPU clock frequency instead. */
     };
 }
 
@@ -293,44 +318,16 @@ static Property riscv_harts_props[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static struct TCGCPUOps tcg_ops = { 0 };
 
 static void esp_cpu_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    CPUClass *cc = CPU_CLASS(klass);
     EspRISCVCPUClass *cpuclass = ESP_CPU_CLASS(klass);
 
     device_class_set_props(dc, riscv_harts_props);
     /* Save the parent realize function in order to be able to call it later */
     device_class_set_parent_realize(dc, esp_cpu_realize,
                                     &cpuclass->parent_realize);
-    // device_class_set_parent_reset(dc, esp_cpu_reset, &cpuclass->parent_reset);
-
-    /* The goal of this RISC-V CPU child class is to override the way interrupts are handled.
-     * In theory, it would be enough to override `do_interrupt` function from the CPU's TCGCPUOps
-     * structure, however, in practice, we have to override `riscv_cpu_exec_interrupt` function.
-     * This is due to the fact that the RISC-V implementation doesn't call the `do_interrupt` routine
-     * from its TCGCPUOps routine, but directly calls its `riscv_cpu_do_interrupt` function.
-     * As that structure may be constant, we have to copy it in order to replace one of its field. */
-    memcpy(&tcg_ops, cc->tcg_ops, sizeof(struct TCGCPUOps));
-
-    /* Copy the parent's exec_interrupt function as we will execute it later */
-    cpuclass->parent_exec_interrupt = tcg_ops.cpu_exec_interrupt;
-
-    /* Replace it with our overriden implementation */
-    tcg_ops.cpu_exec_interrupt = esp_cpu_exec_interrupt;
-    cc->tcg_ops = &tcg_ops;
-
-    /* Function to register MIE callback */
-    cpuclass->esp_cpu_register_mie_callback = esp_cpu_register_mie_callback;
-
-    /* Override the CSR write for mstatus */
-    riscv_csr_operations ops;
-    riscv_get_csr_ops(CSR_MSTATUS, &ops);
-    cpuclass->parent_mstatus_write = ops.write;
-    ops.write = esp_cpu_write_mstatus;
-    riscv_set_csr_ops(CSR_MSTATUS, &ops);
 }
 
 static const TypeInfo esp_cpu_info = {

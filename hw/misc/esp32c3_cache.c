@@ -22,6 +22,7 @@
 #include "hw/misc/esp32c3_cache.h"
 #include "hw/misc/esp32c3_xts_aes.h"
 #include "sysemu/block-backend-io.h"
+#include "hw/misc/esp32c3_reg.h"
 
 
 #define CACHE_DEBUG      0
@@ -203,9 +204,9 @@ static const MemoryRegionOps esp32c3_cache_mem_ops = {
     .valid.accepts = esp32c3_cache_mem_accepts,
 };
 
-static void esp32c3_cache_reset(DeviceState *dev)
+static void esp32c3_cache_reset_hold(Object *obj, ResetType type)
 {
-    ESP32C3CacheState *s = ESP32C3_CACHE(dev);
+    ESP32C3CacheState *s = ESP32C3_CACHE(obj);
     memset(s->regs, 0, ESP32C3_CACHE_REG_COUNT * sizeof(*s->regs));
 
     /* Initialize the MMU with invalid entries */
@@ -222,7 +223,7 @@ static void esp32c3_cache_reset(DeviceState *dev)
 static void esp32c3_cache_realize(DeviceState *dev, Error **errp)
 {
     /* Initialize the registers */
-    esp32c3_cache_reset(dev);
+    esp32c3_cache_reset_hold(OBJECT(dev), RESET_TYPE_COLD);
 
     ESP32C3CacheState *s = ESP32C3_CACHE(dev);
 
@@ -262,8 +263,9 @@ static Property esp32c3_cache_properties[] = {
 static void esp32c3_cache_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = esp32c3_cache_reset;
+    rc->phases.hold = esp32c3_cache_reset_hold;
     dc->realize = esp32c3_cache_realize;
     device_class_set_props(dc, esp32c3_cache_properties);
 }

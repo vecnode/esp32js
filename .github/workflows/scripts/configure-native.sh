@@ -19,6 +19,7 @@ echo DBG
     --datadir=share/qemu \
     --enable-gcrypt \
     --enable-sdl \
+    --enable-pixman \
     --enable-slirp \
     --enable-stack-protector \
     --extra-cflags=-Werror \

@@ -4,8 +4,8 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND="noninteractive"
 
-apt-get update -y -q \
-&& apt-get install -y -q --no-install-recommends \
+apt-get update -y -q
+apt-get install -y -q --no-install-recommends \
     build-essential \
     git \
     libgcrypt-dev \
@@ -19,5 +19,5 @@ apt-get update -y -q \
     zlib1g-dev \
 && :
 
-# Even though ./configure installs meason, just specify a version
-/usr/bin/pip3 install meson==1.2.3
+# Even though ./configure installs meson, just specify a version
+/usr/bin/pip3 install meson==1.7.0 tomli==2.2.1

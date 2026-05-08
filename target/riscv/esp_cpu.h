@@ -35,15 +35,11 @@
 /* Define a type that will be used to generate a cycle counter */
 typedef struct {
     uint64_t former_time;
+    uint64_t former_rem_cycles;
     uint64_t cycles;
-    /* The number of nanosecond an instruction takes to execute */
+    /* The number of picoseconds an instruction takes to execute */
     uint64_t divider;
 } ESPCPUCycleCounter;
-
-/**
- * @brief Callback type called when MIE status bit is re-enabled
- */
-typedef void (*EspRISCVCallback)(void*);
 
 /**
  * Espressif's RISC-V core is different from standard RISC-V because of the way interrupts are handled.
@@ -57,42 +53,21 @@ typedef struct EspRISCVCPU {
     ESPCPUCycleCounter cc_user;
     ESPCPUCycleCounter cc_machine;
 
-    /* Callback called when the MIE bit is re-enabled in `mstatus` CSR */
-    EspRISCVCallback mie_enabled_callback;
-    void* mie_enabled_opaque;
-
     /*< public >*/
     /* The parent object already has a reset vector property */
     uint32_t hartid_base;
     /* Parent IRQ_M line */
     qemu_irq parent_irq;
-    /* Number of the IRQ that triggered the interrupt */
-    uint32_t irq_cause;
-    /* Interrupts are not always synchronous, so MIE may still be set to 1 while an
-     * interrupt is waiting to be handled. So, keep a mirrored MIE to mark whether
-     * we can receive interrupts or not. */
-    bool irq_pending;
+    /* Bitmap of interrupt matrix output lines currently asserted on CPU inputs. */
+    uint32_t irq_lines;
 } EspRISCVCPU;
 
 
 typedef struct EspRISCVCPUClass {
     /*< private >*/
     RISCVCPUClass parent_class;
-
-    /*< public >*/
     DeviceRealize parent_realize;
     DeviceReset parent_reset;
     bool (*parent_exec_interrupt)(CPUState *cpu, int interrupt_request);
-    RISCVException (*parent_mstatus_write)(CPURISCVState *env, int csrno, target_ulong val);
 
-    /*< public >*/
-    void (*esp_cpu_register_mie_callback)(EspRISCVCPU *env, EspRISCVCallback callback, void* opaque);
 } EspRISCVCPUClass;
-
-/**
- * @brief Check whether the current CPU state can accept interrupts or not.
- * If an interrupt is currently pending and the MEPC was not set to the reset vector yet,
- * this function returns false.
- * If MIE bit is not set in the MSTATUS register, it will also return false.
- */
-bool esp_cpu_accept_interrupts(EspRISCVCPU *cpu);

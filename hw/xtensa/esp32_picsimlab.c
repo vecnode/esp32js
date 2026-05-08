@@ -240,7 +240,7 @@ void qemu_picsimlab_set_pin(int pin,int value)
    else{
       qemu_irq_lower (pin_irq[pin]);
    }
-   //bql_unlock ();
+   //qemu_mutex_unlock_iothread ();
 }
 
 void qemu_picsimlab_set_apin(int chn,int value)
@@ -483,7 +483,7 @@ static void esp32_soc_realize(DeviceState *dev, Error **errp)
         MemoryRegion *drom = g_new(MemoryRegion, 1);
         MemoryRegion *irom = g_new(MemoryRegion, 1);
 
-        char name[16];
+        char name[18];
         snprintf(name, sizeof(name), "esp32.irom.cpu%d", i);
         memory_region_init_rom(irom, NULL, name,
                             memmap[ESP32_MEMREGION_IROM].size, &error_fatal);
@@ -913,11 +913,8 @@ static void esp32_soc_init(Object *obj)
 
     object_initialize_child(obj, "rmt", &s->rmt, TYPE_ESP32_RMT);
 
-    for(int i=0;i<nb_nics;i++)
-        if (nd_table[i].used && nd_table[i].model && strcmp(nd_table[i].model, TYPE_ESP32_WIFI) == 0){
-            object_initialize_child(obj, "wifi", &s->wifi, TYPE_ESP32_WIFI);
-            s->wifi_dev = DEVICE(&s->wifi);
-        }
+    if(qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL)!=NULL)
+	    object_initialize_child(obj, "wifi", &s->wifi, TYPE_ESP32_WIFI);
 
     object_initialize_child(obj, "fe", &s->fe, TYPE_ESP32_FE);
 
@@ -1008,6 +1005,7 @@ static void esp32_machine_init_spi_flash(Esp32SocState *ss, BlockBackend* blk)
 
     DeviceState *flash_dev = qdev_new(flash_chip_model);
     qdev_prop_set_drive(flash_dev, "drive", blk);
+    qdev_prop_set_uint8(flash_dev, "cs", 0);
     qdev_realize_and_unref(flash_dev, spi_bus, &error_fatal);
     qdev_connect_gpio_out_named(spi_master, SSI_GPIO_CS, 0,
                                 qdev_get_gpio_in_named(flash_dev, SSI_GPIO_CS, 0));
@@ -1020,6 +1018,7 @@ static void esp32_machine_init_psram(Esp32SocState *ss, uint32_t size_mbytes)
     BusState* spi_bus = qdev_get_child_bus(spi_master, "spi");
     DeviceState *psram = qdev_new(TYPE_SSI_PSRAM);
     qdev_prop_set_uint32(psram, "size_mbytes", size_mbytes);
+    qdev_prop_set_uint8(psram, "cs", 1);
     qdev_realize_and_unref(psram, spi_bus, &error_fatal);
     qdev_connect_gpio_out_named(spi_master, SSI_GPIO_CS, 1,
                                 qdev_get_gpio_in_named(psram, SSI_GPIO_CS, 0));
@@ -1050,24 +1049,24 @@ static void esp32_machine_init_openeth(Esp32SocState *ss)
 {
     SysBusDevice *sbd;
     MemoryRegion* sys_mem = get_system_memory();
-    hwaddr reg_base = DR_REG_EMAC_BASE;
-    hwaddr desc_base = reg_base + 0x400;
-
-    for(int i=0;i<nb_nics;i++) {
-        const char* type_openeth = "open_eth";
-        NICInfo *nd = &nd_table[i];
-        if (nd->used && nd->model && strcmp(nd->model, type_openeth) == 0) {
-            DeviceState* open_eth_dev = qdev_new(type_openeth);
-            ss->eth = open_eth_dev;
-            qdev_set_nic_properties(open_eth_dev, nd);
-            sbd = SYS_BUS_DEVICE(open_eth_dev);
-            sysbus_realize_and_unref(sbd, &error_fatal);
-            sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(DEVICE(&ss->intmatrix), ETS_ETH_MAC_INTR_SOURCE));
-            memory_region_add_subregion(sys_mem, reg_base, sysbus_mmio_get_region(sbd, 0));
-            memory_region_add_subregion(sys_mem, desc_base, sysbus_mmio_get_region(sbd, 1));
-        }
-        
-        if (nd->used && nd->model && strcmp(nd->model, TYPE_ESP32_WIFI) == 0) {
+    
+	const char* type_openeth = "open_eth";
+	NICInfo *nd = qemu_find_nic_info(type_openeth, false, NULL);
+	if(nd!=NULL) {
+        hwaddr reg_base = DR_REG_EMAC_BASE;
+        hwaddr desc_base = reg_base + 0x400;
+        qemu_irq irq = qdev_get_gpio_in(DEVICE(&ss->intmatrix), ETS_ETH_MAC_INTR_SOURCE);
+		DeviceState* open_eth_dev = qdev_new(type_openeth);
+        ss->eth = open_eth_dev;
+        qdev_set_nic_properties(open_eth_dev, nd);
+        sbd = SYS_BUS_DEVICE(open_eth_dev);
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        sysbus_connect_irq(sbd, 0, irq);
+        memory_region_add_subregion(sys_mem, reg_base, sysbus_mmio_get_region(sbd, 0));
+        memory_region_add_subregion(sys_mem, desc_base, sysbus_mmio_get_region(sbd, 1));
+	}
+	nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
+	if(nd!=NULL) {
             //get macaddres from efuse file
             device_cold_reset(DEVICE(&ss->efuse));
             char * mptr = (char *)&ss->efuse.efuse_rd.blk0[1];
@@ -1080,7 +1079,6 @@ static void esp32_machine_init_openeth(Esp32SocState *ss)
             esp32_soc_add_periph_device(sys_mem, &ss->wifi, DR_REG_WIFI_BASE);
             sysbus_connect_irq(SYS_BUS_DEVICE(&ss->wifi), 0,
                            qdev_get_gpio_in(DEVICE(&ss->intmatrix), ETS_WIFI_MAC_INTR_SOURCE));
-        } 
     }
 }
 

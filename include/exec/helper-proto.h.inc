@@ -5,7 +5,7 @@
  * Define HELPER_H for the header file to be expanded.
  */
 
-#include "exec/helper-head.h"
+#include "exec/helper-head.h.inc"
 
 /*
  * Work around an issue with --enable-lto, in which GCC's ipa-split pass
@@ -51,6 +51,11 @@ dh_ctype(ret) HELPER(name) (dh_ctype(t1), dh_ctype(t2), dh_ctype(t3), \
                             dh_ctype(t4), dh_ctype(t5), dh_ctype(t6), \
                             dh_ctype(t7)) DEF_HELPER_ATTR;
 
+#define DEF_HELPER_FLAGS_8(name, flags, ret, t1, t2, t3, t4, t5, t6, t7, t8) \
+dh_ctype(ret) HELPER(name) (dh_ctype(t1), dh_ctype(t2), dh_ctype(t3), \
+                            dh_ctype(t4), dh_ctype(t5), dh_ctype(t6), \
+                            dh_ctype(t7), dh_ctype(t8)) DEF_HELPER_ATTR;
+
 #define IN_HELPER_PROTO
 
 #include HELPER_H
@@ -65,4 +70,5 @@ dh_ctype(ret) HELPER(name) (dh_ctype(t1), dh_ctype(t2), dh_ctype(t3), \
 #undef DEF_HELPER_FLAGS_5
 #undef DEF_HELPER_FLAGS_6
 #undef DEF_HELPER_FLAGS_7
+#undef DEF_HELPER_FLAGS_8
 #undef DEF_HELPER_ATTR

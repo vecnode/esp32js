@@ -104,7 +104,7 @@ static uint64_t esp32_spi_read(void *opaque, hwaddr addr, unsigned int size)
         r = 0;
         break;
     case A_SPI_SLAVE:
-        r = s->peripheral_reg;  // transaction done
+        r = BIT(R_SPI_SLAVE_TRANS_DONE_SHIFT) | BIT(R_SPI_SLAVE_TRANS_INTEN_SHIFT);
         break;
     case A_SPI_DMA_OUT_LINK:
         r = s->outlink_reg;
@@ -477,13 +477,14 @@ static const MemoryRegionOps esp32_spi_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32_spi_reset(DeviceState *dev)
+static void esp32_spi_reset_hold(Object *obj, ResetType type)
 {
-    Esp32SpiState *s = ESP32_SPI(dev);
+    Esp32SpiState *s = ESP32_SPI(obj);
     s->pin_reg = 0x6;
     s->user1_reg = FIELD_DP32(0, SPI_USER1, ADDR_BITLEN, 23);
     s->user1_reg = FIELD_DP32(s->user1_reg, SPI_USER1, DUMMY_CYCLELEN, 7);
-    s->user2_reg = 0x70000000;
+    s->user2_reg = FIELD_DP32(0, SPI_USER2, COMMAND_BITLEN, 4);
+    s->user2_reg = FIELD_DP32(s->user2_reg, SPI_USER2, COMMAND_VALUE, 0);
     s->status_reg = 0;
 }
 
@@ -515,8 +516,9 @@ static Property esp32_spi_properties[] = {
 static void esp32_spi_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    dc->reset = esp32_spi_reset;
+    rc->phases.hold = esp32_spi_reset_hold;
     dc->realize = esp32_spi_realize;
     device_class_set_props(dc, esp32_spi_properties);
 }

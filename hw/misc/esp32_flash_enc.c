@@ -7,7 +7,7 @@
  * it under the terms of the GNU General Public License version 2 or
  * (at your option) any later version.
  */
-
+#include <gcrypt.h>
 #include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
@@ -114,7 +114,7 @@ static void esp32_flash_encryption_key_tweak(struct Esp32FlashEncryptionState *s
     }
 }
 
-static void reverse_key_byte_order(const uint32_t* src, uint32_t* dst)
+static inline void reverse_key_byte_order(const uint32_t* src, uint32_t* dst)
 {
     assert( src != dst );
     for (size_t i = 0; i < FLASH_ENCRYPTION_KEY_WORDS; ++i) {
@@ -122,7 +122,7 @@ static void reverse_key_byte_order(const uint32_t* src, uint32_t* dst)
     }
 }
 
-static void reverse_data_byte_order(const uint32_t* src, uint32_t* dst)
+static inline void reverse_data_byte_order(const uint32_t* src, uint32_t* dst)
 {
     assert( src != dst );
     for (size_t i = 0; i < FLASH_ENCRYPTION_DATA_WORDS; ++i) {
@@ -140,7 +140,7 @@ static void esp32_flash_encryption_op(struct Esp32FlashEncryptionState *s)
     memset(s->encrypted_buffer, 0, sizeof(s->encrypted_buffer));
     reverse_key_byte_order(s->efuse_key, reversed_key);
     esp32_flash_encryption_key_tweak(s, s->address_reg, reversed_key, tweaked_key);
-    QCryptoCipher *cipher = qcrypto_cipher_new(QCRYPTO_CIPHER_ALG_AES_256, QCRYPTO_CIPHER_MODE_ECB, (const uint8_t*) tweaked_key, FLASH_ENCRYPTION_KEY_WORDS * 4, &error_abort);
+    QCryptoCipher *cipher = qcrypto_cipher_new(QCRYPTO_CIPHER_ALGO_AES_256, QCRYPTO_CIPHER_MODE_ECB, (const uint8_t*) tweaked_key, FLASH_ENCRYPTION_KEY_WORDS * 4, &error_abort);
     for (size_t total_words = 0; total_words < ARRAY_SIZE(s->buffer_reg); total_words += FLASH_ENCRYPTION_DATA_WORDS) {
         reverse_data_byte_order(s->buffer_reg + total_words, reversed_data);
         qcrypto_cipher_decrypt(cipher, reversed_data, encrypted_data, sizeof(s->buffer_reg), &error_abort);
@@ -165,15 +165,37 @@ void esp32_flash_decrypt_inplace(struct Esp32FlashEncryptionState* s, size_t fla
     uint32_t decrypted_data[FLASH_ENCRYPTION_DATA_WORDS];
 
     reverse_key_byte_order(s->efuse_key, reversed_key);
+#ifdef CONFIG_GCRYPT
+    gcry_cipher_hd_t cipher;
+    gcry_error_t err = gcry_cipher_open(&cipher, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_ECB, 0);
+    if (err != GPG_ERR_NO_ERROR) {
+        fprintf(stderr, "Error initializing cipher: %s\n", gcry_strerror(err));
+        return;
+    }
+
     for (size_t pos = 0; pos < words; pos += FLASH_ENCRYPTION_DATA_WORDS) {
         uint32_t offset = flash_addr + pos * 4;
         esp32_flash_encryption_key_tweak(s, offset, reversed_key, tweaked_key);
-        QCryptoCipher *cipher = qcrypto_cipher_new(QCRYPTO_CIPHER_ALG_AES_256, QCRYPTO_CIPHER_MODE_ECB, (const uint8_t*) tweaked_key, FLASH_ENCRYPTION_KEY_WORDS * 4, &error_abort);
+        gcry_cipher_setkey(cipher, tweaked_key, FLASH_ENCRYPTION_KEY_WORDS * 4);
+        reverse_data_byte_order(data + pos, reversed_data);
+        gcry_cipher_encrypt(cipher, decrypted_data, sizeof(decrypted_data), reversed_data, sizeof(reversed_data));
+        reverse_data_byte_order(decrypted_data, data + pos);
+    }
+
+    gcry_cipher_close(cipher);
+#else
+    #pragma message "NOTE: Using GCRYPT is highly recommended for better performance with flash encryption"
+
+    for (size_t pos = 0; pos < words; pos += FLASH_ENCRYPTION_DATA_WORDS) {
+        uint32_t offset = flash_addr + pos * 4;
+        esp32_flash_encryption_key_tweak(s, offset, reversed_key, tweaked_key);
+        QCryptoCipher *cipher = qcrypto_cipher_new(QCRYPTO_CIPHER_ALGO_AES_256, QCRYPTO_CIPHER_MODE_ECB, (const uint8_t*) tweaked_key, FLASH_ENCRYPTION_KEY_WORDS * 4, &error_abort);
         reverse_data_byte_order(data + pos, reversed_data);
         qcrypto_cipher_encrypt(cipher, reversed_data, decrypted_data, sizeof(decrypted_data), &error_abort);
         reverse_data_byte_order(decrypted_data, data + pos);
         qcrypto_cipher_free(cipher);
     }
+#endif
 }
 
 static void esp32_flash_encryption_on_dl_mode_change(void *opaque, int n,
@@ -242,17 +264,16 @@ static void esp32_flash_encryption_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
-static void esp32_flash_encryption_reset(DeviceState *dev)
+static void esp32_flash_encryption_reset_hold(Object *obj, ResetType type)
 {
-    Esp32FlashEncryptionState *s = ESP32_FLASH_ENCRYPTION(dev);
+    Esp32FlashEncryptionState *s = ESP32_FLASH_ENCRYPTION(obj);
     s->encryption_done = false;
 }
 
 static void esp32_flash_encryption_class_init(ObjectClass *klass, void *data)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    dc->reset = esp32_flash_encryption_reset;
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    rc->phases.hold = esp32_flash_encryption_reset_hold;
 }
 
 static const TypeInfo esp32_flash_encryption_info = {

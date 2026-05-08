@@ -27,6 +27,7 @@
 #include "hw/nvram/esp32_efuse.h"
 #include "hw/xtensa/esp32_intc.h"
 #include "hw/misc/esp32_flash_enc.h"
+#include "hw/net/can/esp32_twai.h"
 #include "hw/sd/dwc_sdmmc.h"
 #include "hw/misc/esp32_iomux.h"
 #include "hw/display/esp_rgb.h"
@@ -40,6 +41,7 @@ typedef struct Esp32SocState {
     Esp32DportState dport;
     Esp32IntMatrixState intmatrix;
     Esp32CrosscoreInt crosscore_int;
+    Esp32TWAIState twai;
     ESP32UARTState uart[ESP32_UART_COUNT];
     Esp32GpioState gpio;
     Esp32RngState rng;

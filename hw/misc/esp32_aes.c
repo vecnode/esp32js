@@ -32,7 +32,7 @@ static void esp32_aes_mode(Esp32AesState *s, uint32_t mode_value)
 static void esp32_aes_start(Esp32AesState *s)
 {
     AES_KEY aes_key;
-    uint32_t full_key[s->mode.bits / 32];
+    uint32_t full_key[32];
     memcpy(full_key, s->key, s->mode.bits / 8);
     if (s->mode.type == ESP32_AES_ENCRYPTION_MODE) {
         AES_set_encrypt_key((unsigned char *)full_key, s->mode.bits, &aes_key);
@@ -90,9 +90,9 @@ static const MemoryRegionOps esp32_aes_ops = {
         .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32_aes_reset(DeviceState *dev)
+static void esp32_aes_reset_hold(Object *obj, ResetType type)
 {
-    Esp32AesState *s = ESP32_AES(dev);
+    Esp32AesState *s = ESP32_AES(obj);
     s->aes_idle_reg = 0;
 }
 
@@ -108,9 +108,8 @@ static void esp32_aes_init(Object *obj)
 
 static void esp32_aes_class_init(ObjectClass *klass, void *data)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-
-    dc->reset = esp32_aes_reset;
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
+    rc->phases.hold = esp32_aes_reset_hold;
 }
 
 static const TypeInfo esp32_aes_info = {

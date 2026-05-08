@@ -16,6 +16,8 @@
 #include "hw/riscv/esp32c3_clk.h"
 #include "hw/nvram/esp32c3_efuse.h"
 #include "hw/misc/esp32c3_xts_aes.h"
+#include "hw/nvram/esp32c3_efuse.h"
+#include "hw/riscv/esp32c3_clk.h"
 
 #define XTS_AES_WARNING 0
 #define XTS_AES_DEBUG   0
@@ -23,6 +25,7 @@
 #define EFUSE_KEY_PURPOSE_XTS_AES_128_KEY 4
 #define XTS_AES_KEY_SIZE 32
 #define ESP32C3_XTS_AES_DATA_UNIT_SIZE 128
+#define ESP32S3_XTS_AES_TWEAK_VALUE 0xFFFF80
 
 struct xts_aes_keys_ctx {
     AES_KEY enc;
@@ -57,23 +60,32 @@ static bool esp32c3_xts_aes_is_ciphertext_spi_visible(ESP32C3XtsAesState *s)
 static bool esp32c3_xts_aes_is_manual_enc_enabled(ESP32C3XtsAesState *s)
 {
     ESP32C3ClockClass *clock_class = ESP32C3_CLOCK_GET_CLASS(s->clock);
-    ESP32C3EfuseClass *efuse_class = ESP32C3_EFUSE_GET_CLASS(s->efuse);
+    ESPEfuseClass *efuse_class = ESP_EFUSE_GET_CLASS(s->efuse);
     uint32_t ext_dev_enc_dec_ctrl_reg = clock_class->get_ext_dev_enc_dec_ctrl(s->clock);
-    return ((ext_dev_enc_dec_ctrl_reg & 1) || ((ext_dev_enc_dec_ctrl_reg & 8) && (efuse_class->get_dis_downlaod_man_encrypt == 0)));
+    return ((ext_dev_enc_dec_ctrl_reg & 1) || ((ext_dev_enc_dec_ctrl_reg & 8) && (efuse_class->get_dis_download_man_encrypt == 0)));
 }
 
 static bool esp32c3_xts_aes_is_flash_enc_enabled(ESP32C3XtsAesState *s)
 {
-    ESP32C3EfuseClass *efuse_class = ESP32C3_EFUSE_GET_CLASS(s->efuse);
+    ESPEfuseClass *efuse_class = ESP_EFUSE_GET_CLASS(s->efuse);
     uint32_t spi_boot_crypt_cnt = efuse_class->get_spi_boot_crypt_cnt(s->efuse);
     return (ctpop32(spi_boot_crypt_cnt) & 1);
 }
 
 static void esp32c3_xts_aes_get_key(ESP32C3XtsAesState *s, uint8_t *key)
 {
+    ESPEfuseClass *efuse_class = ESP_EFUSE_GET_CLASS(s->efuse);
+
     for (int i = EFUSE_BLOCK_KEY0; i < EFUSE_BLOCK_KEY6; i++) {
-        if (esp32c3_efuse_get_key_purpose(s->efuse, i) == EFUSE_KEY_PURPOSE_XTS_AES_128_KEY) {
-            esp32c3_efuse_get_key(s->efuse, i, key);
+        if (efuse_class->get_key_purpose(s->efuse, i) == EFUSE_KEY_PURPOSE_XTS_AES_128_KEY) {
+            efuse_class->get_key(s->efuse, i, key);
+            // flash encryption key is stored in reverse byte order in the efuse block, correct it
+            uint8_t temp;
+            for (int j = 0; j < XTS_AES_KEY_SIZE / 2; j++) {
+                temp = key[j];
+                key[j] = key[XTS_AES_KEY_SIZE - j - 1];
+                key[XTS_AES_KEY_SIZE - j - 1] = temp;
+            }
             return;
         }
     }
@@ -100,7 +112,7 @@ static void esp32c3_xts_aes_encrypt(ESP32C3XtsAesState *s)
     uint8_t output_ciphertext[ESP32C3_XTS_AES_DATA_UNIT_SIZE];
     uint8_t output_ciphertext_reversed[ESP32C3_XTS_AES_DATA_UNIT_SIZE];
 
-    *((uint32_t *) tweak) = cpu_to_le32(s->physical_addr & 0xFFFF80);
+    *((uint32_t *) tweak) = cpu_to_le32(s->physical_addr & ESP32S3_XTS_AES_TWEAK_VALUE);
     memset(tweak + 4, 0, 12);
 
     esp32c3_xts_aes_get_key(s, efuse_key);
@@ -157,12 +169,12 @@ static void esp32c3_xts_aes_decrypt(ESP32C3XtsAesState *s, uint32_t physical_add
     uint8_t output_plaintext_reversed[ESP32C3_XTS_AES_DATA_UNIT_SIZE];
 
     for (int i = 0; i < size; i += ESP32C3_XTS_AES_DATA_UNIT_SIZE) {
-        *((uint32_t *) tweak) = cpu_to_le32((physical_address + i) & 0xFFFF80);
+        *((uint32_t *) tweak) = cpu_to_le32((physical_address + i) & ESP32S3_XTS_AES_TWEAK_VALUE);
         memset(tweak + 4, 0, 12);
 
         memcpy(input_ciphertext, data + i, ESP32C3_XTS_AES_DATA_UNIT_SIZE);
-        for (int i = 0; i < ESP32C3_XTS_AES_DATA_UNIT_SIZE; i++) {
-            input_ciphertext_reversed[i] = input_ciphertext[ESP32C3_XTS_AES_DATA_UNIT_SIZE-i-1];
+        for (int j = 0; j < ESP32C3_XTS_AES_DATA_UNIT_SIZE; j++) {
+            input_ciphertext_reversed[j] = input_ciphertext[ESP32C3_XTS_AES_DATA_UNIT_SIZE-j-1];
         }
 
         xts_decrypt(&aesdata, &aestweak,
@@ -170,8 +182,8 @@ static void esp32c3_xts_aes_decrypt(ESP32C3XtsAesState *s, uint32_t physical_add
                     xts_aes_decrypt,
                     tweak, ESP32C3_XTS_AES_DATA_UNIT_SIZE, output_plaintext_reversed, input_ciphertext_reversed);
 
-        for (int i = 0; i < ESP32C3_XTS_AES_DATA_UNIT_SIZE; i++) {
-            output_plaintext[i] = output_plaintext_reversed[ESP32C3_XTS_AES_DATA_UNIT_SIZE-i-1];
+        for (int j = 0; j < ESP32C3_XTS_AES_DATA_UNIT_SIZE; j++) {
+            output_plaintext[j] = output_plaintext_reversed[ESP32C3_XTS_AES_DATA_UNIT_SIZE-j-1];
         }
 
         memcpy(data + i, output_plaintext, ESP32C3_XTS_AES_DATA_UNIT_SIZE);
@@ -290,9 +302,9 @@ static const MemoryRegionOps esp32c3_xts_aes_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void esp32c3_xts_aes_reset(DeviceState *dev)
+static void esp32c3_xts_aes_reset_hold(Object *obj, ResetType type)
 {
-    ESP32C3XtsAesState *s = ESP32C3_XTS_AES(dev);
+    ESP32C3XtsAesState *s = ESP32C3_XTS_AES(obj);
     memset(s->plaintext, 0, ESP32C3_XTS_AES_PLAIN_REG_CNT * sizeof(uint32_t));
     memset(s->ciphertext, 0, ESP32C3_XTS_AES_PLAIN_REG_CNT * sizeof(uint32_t));
     s->state = XTS_AES_IDLE;
@@ -330,9 +342,10 @@ static void esp32c3_xts_aes_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     ESP32C3XtsAesClass* esp32c3_xts_aes = ESP32C3_XTS_AES_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = esp32c3_xts_aes_realize;
-    dc->reset = esp32c3_xts_aes_reset;
+    rc->phases.hold = esp32c3_xts_aes_reset_hold;
 
     esp32c3_xts_aes->is_ciphertext_spi_visible = esp32c3_xts_aes_is_ciphertext_spi_visible;
     esp32c3_xts_aes->is_flash_enc_enabled = esp32c3_xts_aes_is_flash_enc_enabled;
