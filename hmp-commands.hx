@@ -5,6 +5,31 @@ HXCOMM which specify the name, behaviour and help text for HMP commands.
 HXCOMM Text between SRST and ERST is rST format documentation.
 HXCOMM HXCOMM can be used for comments, discarded from both rST and C.
 
+    {
+        .name       = "esp32_set_gpio_input",
+        .args_type  = "gpio:i,value:i",
+        .params     = "gpio value",
+        .help       = "physicalsim: drive an external level onto an esp32 GPIO input line",
+        .cmd        = hmp_esp32_set_gpio_input,
+    },
+
+SRST
+``esp32_set_gpio_input`` *gpio* *value*
+  physicalsim addition: sets GPIO *gpio*'s external input level to *value* (0/1).
+ERST
+
+    {
+        .name       = "esp32_set_adc",
+        .args_type  = "channel:i,value:i",
+        .params     = "channel value",
+        .help       = "physicalsim: set an esp32 ADC1 channel's raw SAR reading",
+        .cmd        = hmp_esp32_set_adc,
+    },
+
+SRST
+``esp32_set_adc`` *channel* *value*
+  physicalsim addition: sets ADC1 channel *channel*'s raw (0-4095) SAR reading to *value*.
+ERST
 
     {
         .name       = "help|?",
