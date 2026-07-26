@@ -37,6 +37,8 @@
 #include "exec/exec-all.h"
 #include "net/net.h"
 #include "elf.h"
+#include "monitor/hmp.h"
+#include "qapi/qmp/qdict.h"
 
 #ifdef _WIN32
 #include "chardev/char-win.h"
@@ -245,8 +247,44 @@ void qemu_picsimlab_set_pin(int pin,int value)
 
 void qemu_picsimlab_set_apin(int chn,int value)
 {
-   Esp32SensState *s = ESP32_SENS(&(global_s->sens));  
+   Esp32SensState *s = ESP32_SENS(&(global_s->sens));
    s->ADC_values[chn] = value;
+}
+
+/*
+ * physicalsim additions: two HMP monitor commands reachable over the
+ * plain GDB RSP connection any external process already has open (via
+ * the "monitor" / qRcmd extension - see gdbstub/system.c's
+ * gdb_handle_query_rcmd()), for a process that spawned qemu-system-xtensa
+ * as a subprocess (not linked in as a library the way PICSimLab itself
+ * is) and so can't call qemu_picsimlab_set_pin()/set_apin() directly.
+ *
+ * esp32_set_gpio_input doesn't reuse qemu_picsimlab_set_pin() above -
+ * that one drives pin_irq[], which is only wired up when a PICSimLab
+ * pinmap was registered via qemu_picsimlab_register_callbacks() (see
+ * esp32_soc_realize() below, "if(pinmap)"), which never happens for a
+ * plain command-line-spawned qemu-system-xtensa. This resolves the GPIO
+ * device's own named "in" line directly through global_s instead, with
+ * no pinmap dependency at all.
+ */
+void esp32_set_gpio_input(int gpio, int value)
+{
+   if (!global_s) return;
+   qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&global_s->gpio), ESP32_GPIOS_IN, gpio), value);
+}
+
+void hmp_esp32_set_gpio_input(Monitor *mon, const QDict *qdict)
+{
+   int gpio = qdict_get_int(qdict, "gpio");
+   int value = qdict_get_int(qdict, "value");
+   esp32_set_gpio_input(gpio, value);
+}
+
+void hmp_esp32_set_adc(Monitor *mon, const QDict *qdict)
+{
+   int channel = qdict_get_int(qdict, "channel");
+   int value = qdict_get_int(qdict, "value");
+   qemu_picsimlab_set_apin(channel, value);
 }
 
 int qemu_picsimlab_flash_dump( int64_t offset, void *buf, int bytes)
