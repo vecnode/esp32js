@@ -44,23 +44,9 @@ subdir('xen')
 subdir('xenpv')
 subdir('fsi')
 
-subdir('alpha')
-subdir('arm')
-subdir('avr')
-subdir('hppa')
-subdir('i386')
-subdir('loongarch')
-subdir('m68k')
-subdir('microblaze')
-subdir('mips')
-subdir('openrisc')
-subdir('ppc')
+# physicalsim: every other per-CPU-architecture device-model dir upstream
+# QEMU ships here has been removed outright (see target/meson.build's own
+# comment for why) - 'remote' stays (the vfio-user remote-device backend,
+# not tied to any one guest architecture).
 subdir('remote')
-subdir('riscv')
-subdir('rx')
-subdir('s390x')
-subdir('sh4')
-subdir('sparc')
-subdir('sparc64')
-subdir('tricore')
 subdir('xtensa')

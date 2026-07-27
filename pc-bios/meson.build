@@ -1,19 +1,13 @@
 roms = []
+# physicalsim: every edk2-*.fd.bz2 UEFI firmware blob (aarch64/arm/riscv/
+# i386/x86_64/loongarch64 - none of it relevant to an xtensa/ESP32 target)
+# has been removed outright, same "this fork only ships qemu-system-xtensa"
+# reasoning target/meson.build's own comment gives - fds left empty rather
+# than deleting this whole block so unpack_edk2_blobs staying true (an
+# upstream default, not something physicalsim's build flips) still no-ops
+# cleanly instead of failing on missing files.
 if unpack_edk2_blobs
-  fds = [
-    'edk2-aarch64-code.fd',
-    'edk2-arm-code.fd',
-    'edk2-arm-vars.fd',
-    'edk2-riscv-code.fd',
-    'edk2-riscv-vars.fd',
-    'edk2-i386-code.fd',
-    'edk2-i386-secure-code.fd',
-    'edk2-i386-vars.fd',
-    'edk2-x86_64-code.fd',
-    'edk2-x86_64-secure-code.fd',
-    'edk2-loongarch64-code.fd',
-    'edk2-loongarch64-vars.fd',
-  ]
+  fds = []
 
   foreach f : fds
     roms += custom_target(f,
@@ -27,65 +21,18 @@ if unpack_edk2_blobs
   endforeach
 endif
 
+# physicalsim: trimmed to the four blobs the esp32/esp32c3/esp32s3 machine
+# models this fork actually emulates need (esp32_qemu_adapter.cpp's own
+# QEMU_XTENSA_PCBIOS_DIR is exactly this directory) - every other machine's
+# BIOS/VGA-BIOS/option-ROM/firmware blob upstream QEMU ships here (PC BIOS,
+# OpenBIOS, PXE/EFI network ROMs, s390 CCW, SLOF, U-Boot, HPPA/OpenSBI/npcm7xx
+# firmware, edk2 licenses, ...) has been removed outright, same reasoning as
+# target/meson.build's own comment.
 blobs = [
-  'bios.bin',
-  'bios-256k.bin',
-  'bios-microvm.bin',
-  'qboot.rom',
-  'vgabios.bin',
-  'vgabios-cirrus.bin',
-  'vgabios-stdvga.bin',
-  'vgabios-vmware.bin',
-  'vgabios-qxl.bin',
-  'vgabios-virtio.bin',
-  'vgabios-ramfb.bin',
-  'vgabios-bochs-display.bin',
-  'vgabios-ati.bin',
-  'openbios-sparc32',
-  'openbios-sparc64',
-  'openbios-ppc',
-  'QEMU,tcx.bin',
-  'QEMU,cgthree.bin',
-  'pxe-e1000.rom',
-  'pxe-eepro100.rom',
-  'pxe-ne2k_pci.rom',
-  'pxe-pcnet.rom',
-  'pxe-rtl8139.rom',
-  'pxe-virtio.rom',
-  'efi-e1000.rom',
-  'efi-eepro100.rom',
-  'efi-ne2k_pci.rom',
-  'efi-pcnet.rom',
-  'efi-rtl8139.rom',
-  'efi-virtio.rom',
-  'efi-e1000e.rom',
-  'efi-vmxnet3.rom',
   'esp32-v3-rom.bin',
   'esp32-v3-rom-app.bin',
   'esp32c3-rom.bin',
   'esp32s3_rev0_rom.bin',
-  'qemu-nsis.bmp',
-  'multiboot.bin',
-  'multiboot_dma.bin',
-  'linuxboot.bin',
-  'linuxboot_dma.bin',
-  'kvmvapic.bin',
-  'pvh.bin',
-  's390-ccw.img',
-  'slof.bin',
-  'skiboot.lid',
-  'palcode-clipper',
-  'u-boot.e500',
-  'u-boot-sam460-20100605.bin',
-  'qemu_vga.ndrv',
-  'edk2-licenses.txt',
-  'hppa-firmware.img',
-  'hppa-firmware64.img',
-  'opensbi-riscv32-generic-fw_dynamic.bin',
-  'opensbi-riscv64-generic-fw_dynamic.bin',
-  'npcm7xx_bootrom.bin',
-  'vof.bin',
-  'vof-nvram.bin',
 ]
 
 dtc = find_program('dtc', required: false)
