@@ -23,9 +23,9 @@ endif
 
 # physicalsim: trimmed to the two blobs the one machine physicalsim's
 # adapter ever launches actually needs (esp32_qemu_adapter.cpp hardcodes
-# "-machine esp32-picsimlab", never esp32c3/esp32s3 - see
-# hw/xtensa/meson.build's own comment on why those chips' source is gone
-# too). Every other machine's BIOS/VGA-BIOS/option-ROM/firmware blob
+# "-machine esp32", never esp32c3/esp32s3 - see hw/xtensa/meson.build's
+# own comment on why those chips' source is gone too). Every other
+# machine's BIOS/VGA-BIOS/option-ROM/firmware blob
 # upstream QEMU ships here (PC BIOS, OpenBIOS, PXE/EFI network ROMs, s390
 # CCW, SLOF, U-Boot, HPPA/OpenSBI/npcm7xx firmware, edk2 licenses, ...) has
 # been removed outright, same reasoning as target/meson.build's own

@@ -13,6 +13,6 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_dma.c'))
 system_ss.add(when: 'CONFIG_SIFIVE_PDMA', if_true: files('sifive_pdma.c'))
 system_ss.add(when: 'CONFIG_XLNX_CSU_DMA', if_true: files('xlnx_csu_dma.c'))
 # physicalsim: GDMA (esp_gdma.c/esp32c3_gdma.c/esp32s3_gdma.c) is not
-# used by the ESP32 (v3) chip esp32-picsimlab emulates at all - a newer
+# used by the ESP32 (v3) chip the "esp32" machine emulates at all - a newer
 # peripheral introduced in the S2/S3/C3 chips, neither of which this fork
 # still carries (see hw/xtensa/meson.build's own comment).

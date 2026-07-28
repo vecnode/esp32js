@@ -229,8 +229,6 @@ static void uart_write(void *opaque, hwaddr addr,
     esp32_uart_update_irq(s);
 }
 
-extern void (*picsimlab_uart_tx_event)(const uint8_t id, const uint8_t val);
-
 static gboolean uart_transmit(void *do_not_use, GIOCondition cond, void *opaque)
 {
     ESP32UARTState *s = ESP32_UART(opaque);
@@ -250,7 +248,6 @@ static gboolean uart_transmit(void *do_not_use, GIOCondition cond, void *opaque)
         if (qemu_chr_fe_backend_open(&s->chr)){ 
           /*int r = */qemu_chr_fe_write(&s->chr, &b, 1);
         }
-        picsimlab_uart_tx_event(s->id, b);
         fifo8_pop(&s->tx_fifo); //don´t wait for uart read when port closed, serial data will be lost 
 /*
         if (r == 1) {

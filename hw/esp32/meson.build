@@ -3,14 +3,14 @@
 # different hw/ subsystem directories (char, gpio, i2c, misc, net/can,
 # nvram, ssi, timer), grouped there only by generic device *category*
 # (uart/gpio/i2c/timer/...), not by which chip they belong to. Since
-# esp32-picsimlab is the only machine this fork emulates, "which
-# category of device" is a less useful grouping than "is this part of
-# the ESP32" - this directory is that grouping. hw/xtensa/ keeps the
-# xtensa-generic CPU/interrupt-controller/memory files (mx_pic.c,
-# pic_cpu.c, xtensa_memory.c) and the machine/SoC top files (esp32.c,
-# esp32_intc.c, esp32_picsimlab.c) - those aren't peripheral *devices*,
-# they're the CPU and board itself, and QEMU convention keeps a board's
-# own top-level file in its own arch directory.
+# esp32 is the only machine this fork emulates, "which category of
+# device" is a less useful grouping than "is this part of the ESP32" -
+# this directory is that grouping. hw/xtensa/ keeps the xtensa-generic
+# CPU/interrupt-controller/memory files (mx_pic.c, pic_cpu.c,
+# xtensa_memory.c) and the machine/SoC top files (esp32.c, esp32_intc.c)
+# - those aren't peripheral *devices*, they're the CPU and board itself,
+# and QEMU convention keeps a board's own top-level file in its own arch
+# directory.
 system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files(
   'esp32_uart.c',
   'esp32_gpio.c',
@@ -18,7 +18,6 @@ system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files(
   'esp32_efuse.c',
   'esp32_spi.c',
   'esp32_rmt.c',
-  'picsimlab_spi.c',
   'esp32_frc_timer.c',
   'esp32_timg.c',
   'esp32_crosscore_int.c',

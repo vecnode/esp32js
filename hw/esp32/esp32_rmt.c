@@ -22,8 +22,6 @@
 
 #define DEBUG 0
 
-extern void (*picsimlab_rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value);
-
 static void restart_timer(Esp32RmtState *s, int channel) {
     timer_mod_anticipate_ns(&s->rmt_timer,qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)+1250*s->txlim[channel]);
 }
@@ -74,7 +72,6 @@ static void send_data(Esp32RmtState *s, int channel) {
         if(ssc){
            ssc->transfer(slave,v);
         }
-        picsimlab_rmt_event(channel, s->conf0[channel], v);
     }
     s->sent+=s->txlim[channel];
     s->int_raw|=(1<<(channel+24)); //set THR

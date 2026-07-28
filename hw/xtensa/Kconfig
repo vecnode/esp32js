@@ -16,10 +16,11 @@ config XTENSA_ESP32
     # I2C itself used to become true only as an accidental side effect of
     # unrelated ARM/PPC board Kconfig entries (hw/arm/Kconfig,
     # hw/ppc/Kconfig - both now removed) unconditionally selecting it -
-    # explicit here instead, since PICSIMLAB_I2C (esp32's own I2C
-    # peripheral model) genuinely depends on it regardless of what other
-    # architectures this fork does or doesn't still carry.
+    # explicit here instead. Genuinely needed: hw/i2c/meson.build only
+    # pulls its whole i2c_ss (which esp32_i2c.c, the ESP32's own I2C bus
+    # controller, is added to) into the build when CONFIG_I2C is set, and
+    # esp32_machine_init_i2c() (hw/xtensa/esp32.c) attaches a real tmp105
+    # temperature sensor to that bus.
     select I2C
-    select PICSIMLAB_I2C
 
 

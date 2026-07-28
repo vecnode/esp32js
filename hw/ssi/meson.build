@@ -10,8 +10,9 @@ system_ss.add(when: 'CONFIG_XILINX_SPI', if_true: files('xilinx_spi.c'))
 system_ss.add(when: 'CONFIG_XILINX_SPIPS', if_true: files('xilinx_spips.c'))
 system_ss.add(when: 'CONFIG_XLNX_VERSAL', if_true: files('xlnx-versal-ospi.c'))
 system_ss.add(when: 'CONFIG_IMX', if_true: files('imx_spi.c'))
-# physicalsim: esp32_spi.c/esp32_rmt.c/picsimlab_spi.c moved to
-# hw/esp32/meson.build.
+# physicalsim: esp32_spi.c/esp32_rmt.c moved to hw/esp32/meson.build
+# (picsimlab_spi.c, also originally here, was removed outright - see
+# hw/xtensa/esp32.c's comment on why).
 system_ss.add(when: 'CONFIG_IBEX', if_true: files('ibex_spi_host.c'))
 system_ss.add(when: 'CONFIG_BCM2835_SPI', if_true: files('bcm2835_spi.c'))
 system_ss.add(when: 'CONFIG_PNV_SPI', if_true: files('pnv_spi.c'))

@@ -37,12 +37,57 @@
 #include "exec/exec-all.h"
 #include "net/net.h"
 #include "elf.h"
+#include "monitor/hmp.h"
+#include "qapi/qmp/qdict.h"
 
 #define TYPE_ESP32_SOC "xtensa.esp32"
 #define ESP32_SOC(obj) OBJECT_CHECK(Esp32SocState, (obj), TYPE_ESP32_SOC)
 
 #define TYPE_ESP32_CPU XTENSA_CPU_TYPE_NAME("esp32")
 
+/*
+ * global_s + the two HMP monitor commands below are physicalsim's own
+ * addition, ported here from what used to be a separate esp32_picsimlab.c
+ * (now removed - see hw/xtensa/meson.build's own comment) after auditing
+ * everything that file added on top of this one. Everything else in that
+ * file was PICSimLab's own in-process callback API (PICSimLab links
+ * libqemu directly and gets pin/SPI/I2C events via C function pointers -
+ * qemu_picsimlab_register_callbacks() and friends) - genuinely unused by
+ * physicalsim, which spawns qemu-system-xtensa.exe as a separate process
+ * and only ever talks to it over the GDB RSP connection
+ * (esp32_qemu_adapter.cpp's run_monitor()), so none of that callback
+ * plumbing was ported.
+ *
+ * These two commands are reachable over that same GDB RSP connection
+ * (via the "monitor" / qRcmd extension - see gdbstub/system.c's
+ * gdb_handle_query_rcmd()) as "esp32_set_gpio_input <gpio> <value>" and
+ * "esp32_set_adc <channel> <value>" - see hmp-commands.hx for the
+ * command-table entries that dispatch to hmp_esp32_set_gpio_input()/
+ * hmp_esp32_set_adc() below.
+ */
+static Esp32SocState *global_s = NULL;
+
+void esp32_set_gpio_input(int gpio, int value)
+{
+   if (!global_s) return;
+   qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&global_s->gpio), ESP32_GPIOS_IN, gpio), value);
+}
+
+void hmp_esp32_set_gpio_input(Monitor *mon, const QDict *qdict)
+{
+   int gpio = qdict_get_int(qdict, "gpio");
+   int value = qdict_get_int(qdict, "value");
+   esp32_set_gpio_input(gpio, value);
+}
+
+void hmp_esp32_set_adc(Monitor *mon, const QDict *qdict)
+{
+   if (!global_s) return;
+   int channel = qdict_get_int(qdict, "channel");
+   int value = qdict_get_int(qdict, "value");
+   Esp32SensState *sens = ESP32_SENS(&(global_s->sens));
+   sens->ADC_values[channel] = value;
+}
 
 
 enum {
@@ -558,6 +603,7 @@ static void esp32_soc_realize(DeviceState *dev, Error **errp)
     esp32_soc_add_unimp_device(sys_mem, "esp32.chipv7_phyb", DR_REG_WDEV_BASE, 0x1000,0);
     esp32_soc_add_unimp_device(sys_mem, "esp32.unknown_wifi", DR_REG_NRX_BASE  - 0x0C00, 0x1000,-1);
     esp32_soc_add_unimp_device(sys_mem, "esp32.unknown_wifi1", DR_REG_BB_BASE , 0x1000,-1);
+    esp32_soc_add_unimp_device(sys_mem, "esp32.bluetooth", DR_REG_BT_BASE , 0x1000,-1);
 
 /*
     esp32_soc_add_unimp_device(sys_mem, "esp32.analog", DR_REG_ANA_BASE, 0x1000);
@@ -602,6 +648,7 @@ static void esp32_soc_realize(DeviceState *dev, Error **errp)
 static void esp32_soc_init(Object *obj)
 {
     Esp32SocState *s = ESP32_SOC(obj);
+    global_s = s; /* for esp32_set_gpio_input()/hmp_esp32_set_adc() above */
     MachineState *ms = MACHINE(qdev_get_machine());
     char name[16];
 
@@ -837,6 +884,15 @@ static void esp32_machine_init_openeth(Esp32SocState *ss)
 	}
 	nd = qemu_find_nic_info(TYPE_ESP32_WIFI, false, NULL);
 	if(nd!=NULL) {
+        /* Derive the WiFi MAC from the efuse-stored base MAC, same as a
+         * real chip, instead of leaving it at QEMU's own NIC default -
+         * ported from what used to be esp32_picsimlab.c's own wifi init
+         * (see this file's own comment on global_s above). */
+        device_cold_reset(DEVICE(&ss->efuse));
+        char *mptr = (char *)&ss->efuse.efuse_rd.blk0[1];
+        for (int i = 0; i < 6; i++) {
+            ss->wifi.macaddr[i] = mptr[5 - i];
+        }
         qdev_set_nic_properties(DEVICE(&ss->wifi), nd);
         sbd = SYS_BUS_DEVICE(DEVICE(&ss->wifi));
         sysbus_realize_and_unref(sbd, &error_fatal);

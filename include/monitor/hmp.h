@@ -179,7 +179,7 @@ void hmp_info_mtree(Monitor *mon, const QDict *qdict);
 void hmp_info_cryptodev(Monitor *mon, const QDict *qdict);
 void hmp_dumpdtb(Monitor *mon, const QDict *qdict);
 
-/* physicalsim additions - hw/xtensa/esp32_picsimlab.c */
+/* physicalsim additions - hw/xtensa/esp32.c */
 void hmp_esp32_set_gpio_input(Monitor *mon, const QDict *qdict);
 void hmp_esp32_set_adc(Monitor *mon, const QDict *qdict);
 

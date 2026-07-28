@@ -21,5 +21,7 @@ i2c_ss.add(when: 'CONFIG_PPC4XX', if_true: files('ppc4xx_i2c.c'))
 i2c_ss.add(when: 'CONFIG_PCA954X', if_true: files('i2c_mux_pca954x.c'))
 i2c_ss.add(when: 'CONFIG_PMBUS', if_true: files('pmbus_device.c'))
 i2c_ss.add(when: 'CONFIG_BCM2835_I2C', if_true: files('bcm2835_i2c.c'))
-i2c_ss.add(when: 'CONFIG_PICSIMLAB_I2C', if_true: files('picsimlab_i2c.c'))
+# physicalsim: picsimlab_i2c.c removed - it only ever existed to relay
+# I2C bus events to PICSimLab's own in-process callback API (see
+# hw/xtensa/esp32.c's comment on why that whole mechanism is gone).
 system_ss.add_all(when: 'CONFIG_I2C', if_true: i2c_ss)

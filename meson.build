@@ -3785,8 +3785,8 @@ if 'CONFIG_TCG' in config_all_accel
   subdir('contrib/plugins')
 endif
 
-# physicalsim: kept common-user/bsd-user/linux-user despite esp32-picsimlab
-# never using QEMU's user-mode emulation - a first attempt at removing
+# physicalsim: kept common-user/bsd-user/linux-user despite esp32 never
+# using QEMU's user-mode emulation - a first attempt at removing
 # these broke `meson setup` ("linux-user/include/host/x86_64 does not
 # exist"): have_linux_user can end up true here even with
 # --target-list=xtensa-softmmu (something scans configs/targets/*.mak
