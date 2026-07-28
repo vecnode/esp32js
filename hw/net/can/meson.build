@@ -6,4 +6,4 @@ system_ss.add(when: 'CONFIG_CAN_CTUCANFD', if_true: files('ctucan_core.c'))
 system_ss.add(when: 'CONFIG_CAN_CTUCANFD_PCI', if_true: files('ctucan_pci.c'))
 system_ss.add(when: 'CONFIG_XLNX_ZYNQMP', if_true: files('xlnx-zynqmp-can.c'))
 system_ss.add(when: 'CONFIG_XLNX_VERSAL', if_true: files('xlnx-versal-canfd.c'))
-system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files('esp32_twai.c'))
+# physicalsim: esp32_twai.c moved to hw/esp32/meson.build.

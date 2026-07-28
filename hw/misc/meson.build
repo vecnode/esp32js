@@ -136,41 +136,13 @@ system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files(
 
 system_ss.add(when: 'CONFIG_MSF2', if_true: files('msf2-sysreg.c'))
 system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
-system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files(
-  'esp32_crosscore_int.c',
-  'esp32_dport.c',
-  'esp32_rng.c',
-  'esp32_rsa.c',
-  'esp32_rtc_cntl.c',
-  'esp32_sha.c',
-  'esp32_aes.c',
-  'esp32_ledc.c',
-  'esp32_flash_enc.c',
-  'ssi_psram.c',
-  'esp32_sens.c',
-  'esp32_ana.c',
-  'esp32_wifi.c',
-  'esp32_fe.c',
-  'esp32_phya.c',
-  'esp32_wifi_ap.c',
-  'esp32_wlan_packet.c',
-  'esp32_iomux.c'
-))
-
-# physicalsim: the CONFIG_RISCV_ESP32C3/CONFIG_XTENSA_ESP32S3-gated file
-# bundles that used to live here (esp32c3_*/esp32s3_* peripheral variants,
-# plus the esp_*.c helpers only those two chips used) are gone - neither
-# chip is emulated by this fork anymore (see hw/xtensa/meson.build's own
-# comment). The plain CONFIG_XTENSA_ESP32 block above already covers
-# everything esp32-picsimlab actually needs, including ssi_psram.c and
-# esp32_iomux.c which used to also be listed (redundantly) in the removed
-# blocks.
-
-if gcrypt.found()
-  system_ss.add(when: [gcrypt, 'CONFIG_XTENSA_ESP32'], if_true: files(
-    'esp32_rsa.c',
-  ))
-endif
+# physicalsim: every ESP32 peripheral file that used to live in this
+# directory (crosscore_int/dport/rng/rsa/rtc_cntl/sha/aes/ledc/
+# flash_enc/ssi_psram/sens/ana/wifi/fe/phya/wifi_ap/wlan_packet/iomux,
+# plus the esp32_reg.h register-def header they share) has moved to
+# hw/esp32/ - see that directory's own meson.build, which registers
+# every ESP32 peripheral (previously scattered across nine different
+# hw/ subsystem directories) in one place.
 
 system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
 

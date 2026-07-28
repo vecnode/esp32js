@@ -3561,6 +3561,7 @@ if have_system
     'backends/tpm',
     'ebpf',
     'hw/9pfs',
+    'hw/esp32',
     'hw/acpi',
     'hw/adc',
     'hw/audio',

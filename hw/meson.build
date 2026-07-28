@@ -47,6 +47,10 @@ subdir('fsi')
 # physicalsim: every other per-CPU-architecture device-model dir upstream
 # QEMU ships here has been removed outright (see target/meson.build's own
 # comment for why) - 'remote' stays (the vfio-user remote-device backend,
-# not tied to any one guest architecture).
+# not tied to any one guest architecture). 'esp32' is new - every ESP32
+# peripheral device model consolidated into one directory (see its own
+# meson.build) instead of scattered across the subsystem dirs above;
+# processed after them since it reuses i2c_ss, declared by 'i2c' above.
 subdir('remote')
+subdir('esp32')
 subdir('xtensa')

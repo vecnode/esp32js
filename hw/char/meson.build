@@ -33,11 +33,8 @@ system_ss.add(when: 'CONFIG_SH_SCI', if_true: files('sh_serial.c'))
 system_ss.add(when: 'CONFIG_STM32F2XX_USART', if_true: files('stm32f2xx_usart.c'))
 system_ss.add(when: 'CONFIG_STM32L4X5_USART', if_true: files('stm32l4x5_usart.c'))
 system_ss.add(when: 'CONFIG_MCHP_PFSOC_MMUART', if_true: files('mchp_pfsoc_mmuart.c'))
-# physicalsim: the CONFIG_RISCV_ESP32C3/CONFIG_XTENSA_ESP32S3-gated
-# variants of this line (esp32c3_uart.c/esp32s3_uart.c) are gone -
-# esp32-picsimlab (the only machine this fork's adapter ever launches)
-# needs esp32_uart.c only, already covered here.
-system_ss.add(when: 'CONFIG_XTENSA_ESP32', if_true: files('esp32_uart.c'))
+# physicalsim: esp32_uart.c moved to hw/esp32/ - see that directory's
+# own meson.build, which registers every ESP32 peripheral in one place.
 system_ss.add(when: 'CONFIG_HTIF', if_true: files('riscv_htif.c'))
 system_ss.add(when: 'CONFIG_GOLDFISH_TTY', if_true: files('goldfish_tty.c'))
 
