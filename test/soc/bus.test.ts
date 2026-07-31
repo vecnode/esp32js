@@ -169,6 +169,23 @@ describe('SystemBus', () => {
 
       expect(output).toEqual([0x68, 0x69]); // "hi"
     });
+
+    it('drives a real RXFIFO_FULL interrupt end to end through the matrix to a real Cpu, via bus.uart0.pushRx', () => {
+      const bus = new SystemBus();
+      const cpu = new Cpu(new RegisterFile(), bus, MEMORY_MAP.iram.base);
+      bus.intmatrix.attach(cpu);
+      cpu.intenable = 1 << 9; // route UART0's source to CPU line 9 (level 1)
+      bus.write32(PERIPHERAL_BASE.dport + 0x104 + INTMATRIX_SOURCE.UART0 * 4, 9);
+
+      const RXFIFO_FULL_THRD = 1; // CONF1 bits[6:0]
+      bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.CONF1, RXFIFO_FULL_THRD);
+      bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.INT_ENA, 0b1); // RXFIFO_FULL
+
+      bus.uart0.pushRx('A'.charCodeAt(0));
+
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+    });
   });
 
   describe('GPIO dispatch', () => {

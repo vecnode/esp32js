@@ -38,7 +38,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O + per-pin edge/level interrupts)**, see Phase 4/5 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
 | `peripherals/iomux.ts` | `hw/esp32/esp32_iomux.c` — **done (per-pin register storage)**, see Phase 4 status | pins 28-31 undocumented in the reference itself, omitted here too; no GPIO function-select side effects |
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (T0/T1 counters + alarms, full WDT stage pipeline)**, see Phase 4/5 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far; polled `advance(cycles)`, not real-time-paced like the reference |
-| `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
+| `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX + real RX FIFO + interrupts, no TX pacing - the reference has none either)**, see Phase 4/5 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c` — **done (ADC1/ADC2 channel select + injected value read)**, see Phase 4 status | touch sensor channels and ADC_ATTEN/width config not modeled |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
@@ -389,14 +389,12 @@ generalizes this into a small peripheral-slot table (base/size/device)
 rather than hardcoding a single UART special case, so adding the next
 peripheral (GPIO, below) was a data addition, not new dispatch logic.
 
-Not implemented for UART0, and why: RX (`UART_FIFO` always reads back
-0xEE, matching the reference's own "FIFO empty" case, since there's no
-receive path yet); interrupt generation (`UART_INT_RAW`/`ST` would need
-`esp32_uart_update_irq` - the interrupt matrix itself now exists, see
-below, but nothing computes UART0's live interrupt condition to feed into
-it yet); baud-rate timing (`UART_CLKDIV` is stored but nothing paces
-against it, since this interpreter has no real-time clock to pace against
-yet). UART1/UART2 remain fully open.
+At this point in the project, UART0 was TX-only: RX (`UART_FIFO` always
+read back 0xEE, matching the reference's own "FIFO empty" case) and
+interrupt generation (`esp32_uart_update_irq` needs live FIFO conditions
+this repo didn't compute yet) were both open. Real RX and interrupts came
+later, once the cycle counter existed - see Phase 5 status below. UART1/
+UART2 remain fully open.
 
 `peripherals/gpio.ts`'s `Gpio` (digital I/O only) is the second live
 peripheral, from `include/hw/esp32/esp32_gpio.h`/`hw/esp32/esp32_gpio.c`.
@@ -602,7 +600,39 @@ onInterruptChange` to `IntMatrix.setSourceLevel(INTMATRIX_SOURCE.GPIO,
 `test/soc/bus.test.ts` proves a real rising-edge GPIO interrupt reaching a
 real `Cpu` through the matrix end to end.
 
-Still open for Phase 5: UART RX injection, interrupt generation, and TX
-pacing; and a `Board` runtime (`src/boards/`) tying `Cpu`+`SystemBus`+a
-`BoardDefinition` together with firmware loading and pin/serial
-passthroughs for ESP32 DevKit V1, DevKit C V4, and ESP32-CAM.
+`peripherals/uart.ts`'s `Uart0` gets a real RX FIFO and real interrupt
+generation too. `pushRx(byte)` (the external-stimulus entry point, same
+shape as `Gpio.setPin`) feeds a FIFO capped at the real 128-byte
+`UART_FIFO_LENGTH`; `UART_FIFO` reads pop from it (still falling back to
+`0xEE` only when empty), and `UART_STATUS`'s `RXFIFO_CNT` reflects real
+depth. `esp32_uart_update_irq`'s condition is ported directly: `RXFIFO_
+FULL` (depth >= `UART_CONF1`'s `RXFIFO_FULL_THRD`), `TXFIFO_EMPTY`, and
+`TX_DONE`, plus `RXFIFO_TOUT` (an idle-since-last-RX timeout, polled via
+`advance(cycles)` instead of the reference's real-time `QEMUTimer` -
+`UART_CONF1`'s `TOUT_THRD` bit-count converts straight into a cycle count
+via `UART_CLKDIV`'s divider, `cycles = thresholdBits * clkdiv`, without
+needing a separate APB-frequency constant, the same "one cycle == one APB
+tick" convention `peripherals/timer.ts` already established). The combined
+result is `Uart0.onInterruptChange`, which `soc/bus.ts`'s constructor wires
+to `INTMATRIX_SOURCE.UART0` - the same immediate-constructor-time pattern
+as TIMG/GPIO. `test/soc/bus.test.ts` proves a real RXFIFO_FULL interrupt
+reaching a real `Cpu` through the matrix via `bus.uart0.pushRx`.
+
+TX pacing turned out to not be a gap to close at all, once the reference
+was actually checked rather than assumed: `uart_transmit` drains the
+*entire* TX FIFO synchronously in one call (writing straight to the real
+chardev backend) before `esp32_uart_update_irq` even runs - there is no
+real per-byte TX timing in the reference to port. `TXFIFO_EMPTY`/`TX_DONE`
+are consequently "always empty"/"never done" by the time anything observes
+them, in the reference as much as here; `onTx` firing synchronously was
+already the right model. A second surprising, faithfully-preserved quirk:
+`UART_INT_CLR` only has one real effect (clearing `RXFIFO_TOUT`'s flag) -
+`uart_write` calls `esp32_uart_update_irq` unconditionally after every
+write, which immediately recomputes `INT_RAW`/`INT_ST` from live
+conditions and overwrites whatever `INT_CLR`'s own direct register
+manipulation just did; a still-true level condition like `RXFIFO_FULL`
+cannot be silenced by writing `INT_CLR` while it remains true.
+
+Still open for Phase 5: a `Board` runtime (`src/boards/`) tying
+`Cpu`+`SystemBus`+a `BoardDefinition` together with firmware loading and
+pin/serial passthroughs for ESP32 DevKit V1, DevKit C V4, and ESP32-CAM.
