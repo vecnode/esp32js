@@ -122,11 +122,12 @@ Phase 1: SoC memory map (`soc/memmap.ts`) and the three board definitions
 (`boards/`), both pure data validated against the addresses above.
 
 Phase 2 (in progress): `cpu/decode.ts` + `cpu/cpu.ts` implement a fetch/
-execute loop covering both instruction widths - 24-bit (ADD, SUB, MOVI,
-L32I, S32I, L32R, L32E, S32E, J, BEQ/BNE/BLT/BGE, CALL0, CALL4/8/12, ENTRY,
-RET, RETW, RFWO, RFWU) and 16-bit density (ADD.N, ADDI.N, L32I.N, S32I.N,
-MOVI.N, BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N) - enough to run
-hand-assembled control flow including a full windowed call/return sequence
+execute loop covering both instruction widths - 24-bit (ADD, SUB, AND, OR,
+XOR, NEG, ABS, MOVI, L32I, S32I, L32R, L32E, S32E, J, BEQ/BNE/BLT/BGE,
+CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU, SLL, SRL, SRA, SRC, SLLI,
+SRAI, SRLI, SSR, SSL, SSAI) and 16-bit density (ADD.N, ADDI.N, L32I.N,
+S32I.N, MOVI.N, BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N) - enough to
+run hand-assembled control flow including a full windowed call/return sequence
 that exercises `cpu/registers.ts`'s rotate/markFrameLive/isFrameLive
 mechanics end to end (previously untested). Bit layouts, PC-relocation
 formulas, and exception-vectoring semantics were pulled from this repo's
@@ -152,6 +153,27 @@ cases. MOVI.N's immediate is a genuinely asymmetric range (-32..95, not a
 plain signed 7-bit field) verified directly against
 `OperandSem_opnd_sem_simm7_decode`'s bit trick rather than assumed.
 
+The logical (AND/OR/XOR/NEG/ABS) and shift (SLL/SRL/SRA/SRC/SLLI/SRAI/
+SRLI/SSR/SSL/SSAI) groups round out the RRR opcode space under op0=0. Two
+things worth flagging as non-obvious, both verified against the reference
+rather than assumed:
+  - SLLI's and SRAI's immediate fields overlap op2's own low bit - the
+    "opcode selector" and part of the shift-amount operand are the *same
+    physical bit*, reused for different purposes (`Field_sal`/
+    `Field_sargt` in xtensa-modules.inc.c both fold in "bit[20]", which is
+    literally op2's LSB). Missing this would either misdecode these as a
+    different opcode or silently truncate the shift amount to 4 bits.
+  - `Cpu.sar` (the SAR/shift-amount special register): SSR and SSAI store
+    the amount directly (0-31), SSL stores its 32's-complement (1-32)
+    instead, but SLL/SRL/SRA/SRC don't need to track which mode was used
+    last - real hardware doesn't either, since `translate_sll`'s fallback
+    path computes `(32 - SAR) & 0x3f` unconditionally and that happens to
+    equal the "fast path" QEMU takes when it can prove SSL ran most
+    recently in the same translation block. That fast path is purely a
+    compile-time optimization, not a distinct runtime behavior, so this
+    interpreter (which has no equivalent of "the same translation block")
+    doesn't need to reproduce it - it just always applies the one formula.
+
 A minimal exception model now exists directly on `Cpu`: PS.EXCM, PS.OWB,
 EPC1, and a configurable VECBASE (defaulting to its hardware reset value,
 `0x40000000`). Illegal instructions, double exceptions, and window
@@ -176,10 +198,11 @@ represent "illegal instruction" so it isn't a modeled register, just an
 guaranteed-illegal, both rare in ordinary compiled code) aren't specially
 handled - they fall through to the same ILLEGAL path as any unrecognized
 opcode, which happens to be correct for ILL.N and an acceptable stand-in
-for BREAK.N until debug exceptions exist. The 24-bit ADDI, logical
-(AND/OR/XOR), and shift instructions are still unimplemented - only their
-density (`.N`) or windowed-call-specific counterparts exist so far. A real
-PS register, interrupt levels, and the rest of `translate.c`'s opcode set
+for BREAK.N until debug exceptions exist. The 24-bit ADDI (only its ADDI.N
+density counterpart exists), SSA8L/SSA8B (byte-alignment shift setup, a
+narrower-use variant of SSL/SSR), NSA/NSAU (leading-sign/zero-bit count),
+and MUL/multiply-family instructions are still unimplemented. A real PS
+register, interrupt levels, and the rest of `translate.c`'s opcode set
 (plus `cpu/fpu.ts`) remain open for Phase 2; `cpu/exceptions.ts` as a
 separate module may or may not end up warranted once PS/EPC1 grow further -
 right now that state lives directly on `Cpu` since it's small.
