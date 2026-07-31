@@ -21,6 +21,10 @@ class TestBus implements Bus {
     this.mem[addr + 3] = (value >>> 24) & 0xff;
   }
 
+  writeByte(addr: number, value: number): void {
+    this.mem[addr] = value & 0xff;
+  }
+
   writeInsn(addr: number, word: number): void {
     this.mem[addr] = word & 0xff;
     this.mem[addr + 1] = (word >>> 8) & 0xff;
@@ -367,14 +371,12 @@ describe('Cpu fetch/execute', () => {
     expect(cpu.regs.get(1)).toBe(0x300); // caller's a1 untouched by the callee
   });
 
-  it('vectors ENTRY without a preceding CALLN to the kernel exception vector', () => {
+  it('runs ENTRY without a preceding CALLN as a plain zero-rotation window allocation (e.g. the reset vector\'s own entry point)', () => {
     const { cpu, bus } = makeCpu();
     bus.writeInsn(0, ENTRY(1, 16));
     cpu.step();
-    expect(cpu.lastException).toEqual({ kind: 'illegal' });
-    expect(cpu.pc).toBe(cpu.vecbase + 0x300);
-    expect(cpu.epc1).toBe(0);
-    expect(cpu.excm).toBe(true);
+    expect(cpu.lastException).toBeNull();
+    expect(cpu.regs.getWindowBase()).toBe(0); // pendingCallinc was 0: no rotation
   });
 
   it('vectors RETW with a0=0 (n=0, no windowed call ever made) to the kernel exception vector', () => {
@@ -954,11 +956,12 @@ describe('Cpu fetch/execute', () => {
       expect(cpu.regs.get(2)).toBe(0x123);
     });
 
-    it('RSR/WSR on an unbacked special register is illegal', () => {
+    it('RSR/WSR on an unbacked special register is a harmless read-what-you-wrote no-op', () => {
       const { cpu, bus } = makeCpu();
-      bus.writeInsn(0, RSR(1, 2)); // SR=1 is neither PS(230) nor INTENABLE(228)
+      bus.writeInsn(0, RSR(1, 2)); // SR=1 is neither PS(230), INTENABLE(228), nor VECBASE(231)
       cpu.step();
-      expect(cpu.lastException).toEqual({ kind: 'illegal' });
+      expect(cpu.lastException).toBeNull();
+      expect(cpu.regs.get(2)).toBe(0); // never written, reads back the default
     });
 
     it('RFE returns from a level-1 illegal-instruction exception (clears EXCM, jumps to EPC1)', () => {
