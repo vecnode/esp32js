@@ -44,6 +44,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
 | `soc/dport.ts` | `hw/esp32/esp32_dport.c` — **done (APPCPU control + CPU_PER_CONF + cache-enable storage only)**, see Phase 3 status | CPU control, cache config, PSRAM enable - PSRAM/MMU/flash-encryption still open |
 | `loader/elf.ts` | *(none - standard ELF32, not ESP32-specific)* — **done**, see Phase 3 status | `PT_LOAD` segments + entry point only; no esptool flash-image container, no relocations |
+| `boards/board.ts` | *(none - this project's own board-runtime glue, not ported from the fork)* — **done**, see Phase 5 status | one `Board` class for all three boards; no camera/microSD emulation for ESP32-CAM |
 
 (Every `hw/esp32/*` and `include/hw/esp32/*` path above was corrected from an
 earlier guess that used the wrong directory prefix, e.g. `hw/gpio/`,
@@ -633,6 +634,34 @@ conditions and overwrites whatever `INT_CLR`'s own direct register
 manipulation just did; a still-true level condition like `RXFIFO_FULL`
 cannot be silenced by writing `INT_CLR` while it remains true.
 
-Still open for Phase 5: a `Board` runtime (`src/boards/`) tying
-`Cpu`+`SystemBus`+a `BoardDefinition` together with firmware loading and
-pin/serial passthroughs for ESP32 DevKit V1, DevKit C V4, and ESP32-CAM.
+Phase 5 completes with `src/boards/board.ts`'s `Board` - the piece that
+ties everything above together into something an embedder (physicalsim, a
+test, a REPL) can actually point at a `.elf` and run. One `Board` class
+serves all three real boards (`new Board(ESP32_DEVKIT_V1)`, `new
+Board(ESP32_DEVKIT_C_V4)`, `new Board(ESP32_CAM)`), since every
+`BoardDefinition` here differs only in pin metadata, not emulated behavior
+- the underlying `SystemBus` is identical for all three, matching this
+project's own "one SoC model, thin board data" split from Phase 1. A
+`Board`'s constructor performs the two wiring steps an embedder would
+otherwise have to know exist: `bus.intmatrix.attach(cpu)` (`soc/bus.ts`'s
+own doc comment) and wiring `Uart0.onTx` to a plain `onSerialOut` field.
+`loadFirmware(elf)` calls `loadElf` and starts the `Cpu` at its entry
+point; `step()`/`run(count)` call `cpu.step(); bus.tick(cpu.lastStepCycles)`
+together, so a caller never has to remember that sequencing either.
+`setPin`/`getPin`, `serialIn`, and `setAdcChannel`/`getAdcChannel` are thin
+passthroughs to `bus.gpio`/`bus.uart0`/`bus.adc` - `setPin` additionally
+checks the board's own pin list and calls `onReservedPinWarning` (a plain
+callback, not `console.warn` directly, since a bare global `console` isn't
+part of the ES2020 lib this project targets to stay usable in both the
+browser and Node without pulling in DOM types) when driving a
+`flash-spi`/`boot-strap`/`camera`/`sd-card` pin - still permitted, just
+flagged, since a test might deliberately want to. `test/boards/board.test.ts`
+proves all three boards construct correctly, take a real interrupt through
+the matrix, load and run a real synthetic ELF, and exercise every
+passthrough.
+
+Not implemented: anything camera- or microSD-specific for ESP32-CAM -
+`Board` doesn't add camera frame emulation or SD card behavior; those GPIOs
+are ordinary digital I/O with `role: 'camera'`/`'sd-card'` metadata only,
+consistent with this project's already-established I2S-stub scope limit
+(see "What's real silicon vs. what QEMU itself stubs out" above).
