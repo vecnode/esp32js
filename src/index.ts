@@ -17,3 +17,5 @@ export { IoMux, IOMUX_WINDOW_SIZE } from './peripherals/iomux.js';
 export { Adc, ADC_REG, ADC_WINDOW_SIZE } from './peripherals/adc.js';
 export { ESP32_CAM, ESP32_DEVKIT_C_V4, ESP32_DEVKIT_V1 } from './boards/index.js';
 export type { BoardDefinition, PinAssignment, PinRole } from './boards/index.js';
+export { loadElf } from './loader/elf.js';
+export type { ByteWritable, ElfImage } from './loader/elf.js';
