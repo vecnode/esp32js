@@ -5,6 +5,7 @@ import { SystemBus } from '../../src/soc/bus.js';
 import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE } from '../../src/soc/memmap.js';
 import { UART_REG } from '../../src/peripherals/uart.js';
 import { GPIO_REG } from '../../src/peripherals/gpio.js';
+import { TIMG_REG } from '../../src/peripherals/timer.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -208,6 +209,57 @@ describe('SystemBus', () => {
 
       cpu.step(); // set low
       expect(bus.gpio.getPin(2)).toBe(0);
+    });
+  });
+
+  describe('TIMG0 dispatch', () => {
+    it('routes a 32-bit write/read to T0CONFIG to the Timg peripheral', () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.T0CONFIG, 0x12345678);
+      expect(bus.read32(PERIPHERAL_BASE.timg0 + TIMG_REG.T0CONFIG)).toBe(0x12345678);
+    });
+
+    it('reads WDTPROTECT as the reset default magic word through the bus', () => {
+      const bus = new SystemBus();
+      expect(bus.read32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTPROTECT)).toBe(0x50d83aa1);
+    });
+
+    it('runs a real "disable the watchdog" boot idiom via S32I through the bus', () => {
+      const bus = new SystemBus();
+      const base = MEMORY_MAP.iram.base;
+      const MOVI = (dest: number, imm: number) => {
+        const raw12 = imm & 0xfff;
+        const s = (raw12 >> 8) & 0xf;
+        const imm8 = raw12 & 0xff;
+        return (imm8 << 16) | (0xa << 12) | (s << 8) | (dest << 4) | 0x2;
+      };
+      const S32I = (src: number, base_: number, byteOffset: number) => (((byteOffset >> 2) & 0xff) << 16) | (0x6 << 12) | (base_ << 8) | (src << 4) | 0x2;
+      const writeInsn = (addr: number, word: number) => {
+        bus.writeByte(addr, word & 0xff);
+        bus.writeByte(addr + 1, (word >>> 8) & 0xff);
+        bus.writeByte(addr + 2, (word >>> 16) & 0xff);
+      };
+
+      const protectAddr = PERIPHERAL_BASE.timg0 + TIMG_REG.WDTPROTECT;
+      const config0Addr = PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG0;
+      const cpu = new Cpu(new RegisterFile(), bus, base);
+      cpu.regs.set(1, protectAddr); // addresses far outside MOVI's 12-bit range
+      cpu.regs.set(2, config0Addr);
+      cpu.regs.set(3, 0x50d83aa1); // unlock word
+      cpu.regs.set(4, 0); // WDTCONFIG0 = 0 -> EN bit cleared
+
+      writeInsn(base, S32I(3, 1, 0)); // unlock
+      writeInsn(base + 3, S32I(4, 2, 0)); // disable
+      writeInsn(base + 6, MOVI(5, 0)); // re-lock with a non-magic value
+      writeInsn(base + 9, S32I(5, 1, 0));
+
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      cpu.step();
+
+      expect(bus.timg0.readWord(TIMG_REG.WDTCONFIG0)).toBe(0);
+      expect(bus.timg0.readWord(TIMG_REG.WDTPROTECT)).toBe(0);
     });
   });
 });
