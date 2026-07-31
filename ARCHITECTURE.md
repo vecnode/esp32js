@@ -43,6 +43,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
 | `soc/dport.ts` | `hw/esp32/esp32_dport.c` — **done (APPCPU control + CPU_PER_CONF + cache-enable storage only)**, see Phase 3 status | CPU control, cache config, PSRAM enable - PSRAM/MMU/flash-encryption still open |
+| `loader/elf.ts` | *(none - standard ELF32, not ESP32-specific)* — **done**, see Phase 3 status | `PT_LOAD` segments + entry point only; no esptool flash-image container, no relocations |
 
 (Every `hw/esp32/*` and `include/hw/esp32/*` path above was corrected from an
 earlier guess that used the wrong directory prefix, e.g. `hw/gpio/`,
@@ -330,15 +331,37 @@ includes a real boot idiom end to end: read `RESET_STATE` (as
 `S32I`, observed both through the register read-back and an `onReset`
 callback.
 
-Still open for Phase 3: actually loading a firmware image (`SystemBus`
-exposes `loadBytes()` for this, but nothing produces the bytes yet - no ELF
-parsing or ESP32 image-header handling); this project doesn't execute the
-real boot ROM or 2nd-stage bootloader (no such binary is loaded), so
-"boot" here means a `Cpu` that resets to the right PC with correctly-
-behaving RTC_CNTL/DPORT registers, not a full power-on-to-`app_main()`
-trace; the RTC watchdog (this fork's own RTC_CNTL doesn't model one
-either - see `rtc_cntl.ts`'s doc comment); a real second CPU core (all of
-DPORT's APPCPU_* registers are inert without one).
+Loading a real firmware image is now done too: `loader/elf.ts`'s `loadElf`
+reads an ELF32 file's `PT_LOAD` program headers and writes each segment's
+bytes onto a `Bus` at its real `p_vaddr` (zero-filling any BSS tail where
+`p_memsz` exceeds `p_filesz`), returning `e_entry` to start a `Cpu` at.
+Unlike every other module here, this one isn't ported from the QEMU C
+fork - ELF loading isn't ESP32-specific behavior (real QEMU loads ELF
+images through its generic, board-agnostic `load_elf()`, not anything in
+`hw/esp32/`), so it's a from-scratch implementation of the standard ELF32
+format instead. This is what makes "accept normal ESP32 code" true: a
+`.elf` built by `xtensa-esp32-elf-gcc`/ESP-IDF already has its `PT_LOAD`
+segments placed at real IRAM/DRAM/DROM/IROM addresses by the toolchain's
+own linker script - the same addresses `soc/memmap.ts` models - so loading
+by address directly onto a real `SystemBus` runs real compiled firmware
+without needing a hand-assembled JS test program. `test/soc/bus.test.ts`
+proves this end to end: an ELF built with a `.text` segment (packed
+instruction words) and a `.bss` segment (`p_filesz=0 < p_memsz`, zero-fill
+only) loaded via `loadElf`, then a real `Cpu` started at the returned entry
+point and stepped through those instructions.
+
+Still open for Phase 3: this project doesn't execute the real boot ROM or
+2nd-stage bootloader (no such binary is loaded), so "boot" here means a
+`Cpu` that resets to the right PC with correctly-behaving RTC_CNTL/DPORT
+registers, not a full power-on-to-`app_main()` trace; esptool's separate
+flash-image container format (the `.bin` it produces for flashing over
+serial, distinct from the `.elf` `loadElf` reads) and SPI flash/MMU address
+translation aren't modeled - neither is a CPU or peripheral behavior, and
+both sit strictly before an ELF's segments ever reach the addresses this
+project cares about being accurate at; the RTC watchdog (this fork's own
+RTC_CNTL doesn't model one either - see `rtc_cntl.ts`'s doc comment); a
+real second CPU core (all of DPORT's APPCPU_* registers are inert without
+one).
 
 Phase 4 (started): `peripherals/uart.ts`'s `Uart0` - TX only, wired into
 `soc/bus.ts` as the first live peripheral in the SoC's real address space
