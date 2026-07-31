@@ -34,14 +34,19 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | PS register, vector table, interrupt levels |
 | `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` | single-precision only (`XCHAL_HAVE_DFP=0`) |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
-| `soc/registers.ts` (base addrs) | `include/hw/misc/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
-| `peripherals/gpio.ts` | `hw/gpio/esp32_gpio.c` | + IO_MUX (`hw/misc/esp32_iomux.c`) for pin function select |
-| `peripherals/timer.ts` | `hw/timer/esp32_timg.c` | TIMG0/TIMG1, each with a watchdog |
-| `peripherals/uart.ts` | `hw/char/esp32_uart.c` | 3 instances (UART0/1/2) |
-| `peripherals/adc.ts` | `hw/misc/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
+| `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
+| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` | + IO_MUX (`hw/esp32/esp32_iomux.c`) for pin function select |
+| `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` | TIMG0/TIMG1, each with a watchdog |
+| `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
+| `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32.c` interrupt source enum | peripheral IRQ → CPU interrupt line |
-| `soc/rtc_cntl.ts` | `hw/misc/esp32_rtc_cntl.c` | needed for reset/boot, not just deep-sleep |
-| `soc/dport.ts` | `hw/misc/esp32_dport.c` | CPU control, cache config, PSRAM enable |
+| `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` | needed for reset/boot, not just deep-sleep |
+| `soc/dport.ts` | `hw/esp32/esp32_dport.c` | CPU control, cache config, PSRAM enable |
+
+(Every `hw/esp32/*` and `include/hw/esp32/*` path above was corrected from an
+earlier guess that used the wrong directory prefix, e.g. `hw/gpio/`,
+`hw/timer/`, `hw/char/`, `hw/misc/` - verified against
+`git ls-tree -r cae84de99b^` rather than assumed a second time.)
 
 ## Memory map (from `esp32_memmap[]`, `hw/xtensa/esp32_picsimlab.c:73-84`)
 
@@ -233,9 +238,9 @@ hand-assembled program placed at IRAM's real base address, not just against
 Phase 2's CPU have been exercised together.
 
 Explicitly out of scope for `SystemBus` right now, and flagged rather than
-half-built: peripheral register blocks (`PERIPHERAL_BASE`) aren't backed at
-all (that's Phase 4); DROM/IROM have no read-only enforcement; unmapped
-access reads as 0 / silently no-ops on write instead of raising
+half-built: every peripheral block in `PERIPHERAL_BASE` besides UART0 isn't
+backed at all; DROM/IROM have no read-only enforcement; unmapped access
+reads as 0 / silently no-ops on write instead of raising
 LOAD_STORE_ERROR_CAUSE, because doing that properly needs an
 EXCVADDR-carrying fault channel from `Bus` back to `Cpu` (analogous to
 `HELPER(exception_cause_vaddr)` in `exc_helper.c`) that doesn't exist yet.
@@ -244,5 +249,37 @@ Still open for Phase 3: actually loading a firmware image (`SystemBus`
 exposes `loadBytes()` for this, but nothing produces the bytes yet - no ELF
 parsing or ESP32 image-header handling) and the boot sequence itself
 (`soc/rtc_cntl.ts` for reset, `soc/dport.ts` for CPU/cache config) to get
-from power-on to a loaded image's entry point. Phase 4 (peripherals) is
-still fully open.
+from power-on to a loaded image's entry point.
+
+Phase 4 (started): `peripherals/uart.ts`'s `Uart0` - TX only, wired into
+`soc/bus.ts` as the first live peripheral in the SoC's real address space
+(`PERIPHERAL_BASE.uart0`). Register offsets and behavior are taken from
+`include/hw/esp32/esp32_uart.h` (register map) and `hw/esp32/esp32_uart.c`'s
+`uart_read`/`uart_write` (semantics) - both recoverable from git history at
+`cae84de99b^`, same as the CPU work. `test/soc/bus.test.ts` proves the
+whole path end to end: a real `Cpu` running code loaded in IRAM (Phase 3)
+writes characters via `S32I` into UART0's real peripheral address, and
+`Uart0.onTx` observes them - the first time all three of memory map (Phase
+1), CPU (Phase 2), and a peripheral (Phase 4) have worked together.
+
+One correctness note worth being explicit about: `SystemBus.write32`
+dispatches UART_FIFO writes to `Uart0.writeWord` directly, in one call -
+critical, since a naive byte-by-byte write path (composing the 32-bit write
+from four single-byte writes, the way plain memory regions work) would
+fire `onTx` up to four times with wrong intermediate values instead of once
+with the real byte. Real firmware only ever does aligned 32-bit MMIO
+access, so this was never going to surface as a runtime bug, but it would
+have been a landmine for exactly the kind of side-effecting peripheral
+register this project is about to add more of - `write32`/`read32` route
+to peripherals *before* falling into the generic memory-region byte
+composition, not after, specifically to avoid it.
+
+Not implemented for UART0, and why: RX (`UART_FIFO` always reads back
+0xEE, matching the reference's own "FIFO empty" case, since there's no
+receive path yet); interrupt generation (`UART_INT_RAW`/`ST` would need
+`esp32_uart_update_irq` and a wired interrupt matrix, which is its own
+`peripherals/intmatrix.ts` - not started); baud-rate timing (`UART_CLKDIV`
+is stored but nothing paces against it, since this interpreter has no
+real-time clock to pace against yet). UART1/UART2 and every other
+peripheral in `PERIPHERAL_BASE` (GPIO/IO_MUX, TIMG0/1, SAR ADC,
+interrupt matrix) remain fully open.
