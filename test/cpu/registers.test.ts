@@ -11,7 +11,7 @@ describe('RegisterFile windowing', () => {
   it('rotates the window and preserves the prior frame in phys storage', () => {
     const regs = new RegisterFile();
     regs.set(0, 0xaaaa); // a0 in window 0
-    regs.rotate(1); // simulate CALL4: window advances by one quad
+    regs.rotate(1); // simulate ENTRY after CALL4: window advances by one quad
     expect(regs.getWindowBase()).toBe(1);
 
     regs.set(0, 0xbbbb); // a0 in window 1 is a different physical register

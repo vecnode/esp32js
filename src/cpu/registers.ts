@@ -79,15 +79,22 @@ export class RegisterFile {
     this.syncWindowFromPhys();
   }
 
-  /** Used by CALL4/8/12 and RETW: rotate the window by +/- n quads. */
+  /**
+   * Rotate the window by +/- n quads. Used by ENTRY (+callinc, once the new
+   * frame is marked live - see markFrameLive) and RETW (-n). Note CALLn
+   * itself does *not* rotate on real hardware (`HELPER(entry)` in
+   * `win_helper.c`): it only stashes the return address and sets
+   * PS.CALLINC; the callee's own ENTRY performs the actual rotation.
+   */
   rotate(delta: number): void {
     this.rotateAbs(this.windowBase + delta);
   }
 
   /**
-   * ENTRY: allocates a new call frame `callSize` quads ahead of the current
-   * window and marks it live in WINDOWSTART. Does not rotate the window
-   * itself - the preceding CALLn already did that.
+   * ENTRY: marks the call frame `callSizeQuads` ahead of the current window
+   * live in WINDOWSTART. Call this *before* rotate(callSizeQuads) - it reads
+   * the pre-rotation windowBase, matching `HELPER(entry)` computing
+   * `windowbase_next` and OR-ing its bit in before the rotation is applied.
    */
   markFrameLive(callSizeQuads: number): void {
     const next = this.windowBase + callSizeQuads;
