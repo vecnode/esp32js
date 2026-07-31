@@ -38,6 +38,11 @@ describe('SystemBus', () => {
     expect(bus.read32(MEMORY_MAP.drom.base)).toBe(0);
   });
 
+  it('tick() forwards cycles to every peripheral without throwing, even before any peripheral implements advance()', () => {
+    const bus = new SystemBus();
+    expect(() => bus.tick(5n)).not.toThrow();
+  });
+
   it('reads unmapped addresses as 0 and ignores writes to them, without throwing', () => {
     const bus = new SystemBus();
     const unmapped = 0x12345678; // not inside any MEMORY_MAP region
