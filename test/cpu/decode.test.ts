@@ -143,9 +143,9 @@ describe('decode', () => {
     expect(decode(word)).toEqual({ op: 'S32E', src: 5, base: 2, offset: -4 });
   });
 
-  it('does not decode unimplemented op0=6 members (e.g. BEQZ-shaped, n=1) as J', () => {
-    const word = (100 << 6) | (0x1 << 4) | 0x6; // n=1 -> BEQZ family, out of scope
-    expect(decode(word).op).toBe('ILLEGAL');
+  it('decodes op0=6, n=1 as the BEQZ family (m=0..3 selecting BEQZ/BNEZ/BLTZ/BGEZ), not J', () => {
+    const word = (100 << 6) | (0x1 << 4) | 0x6; // n=1 -> BEQZ family; m=0 here -> BEQZ
+    expect(decode(word)).toEqual({ op: 'BEQZ', a: 9, offset: 1 });
   });
 
   it.each([

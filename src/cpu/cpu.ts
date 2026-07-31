@@ -155,6 +155,8 @@ const CYCLE_COST: Partial<Record<Decoded['op'], bigint>> = {
   REMS: 4n,
   CALL0: 2n,
   CALLN: 2n,
+  CALLX0: 2n,
+  CALLXN: 2n,
   RET: 2n,
   RETW: 2n,
   ENTRY: 3n,
@@ -193,6 +195,8 @@ export interface Bus {
   readByte(addr: number): number;
   read32(addr: number): number;
   write32(addr: number, value: number): void;
+  /** Needed for S8I/S16I - real single/half-word stores, not just the L8UI/L16UI/L16SI reads read32/readByte already covered. */
+  writeByte(addr: number, value: number): void;
 }
 
 export type ExceptionCause =
@@ -236,6 +240,18 @@ const EXCM_LEVEL = 3;
 /** Special register numbers this repo backs via RSR/WSR (real Xtensa SR numbers, not invented). */
 const SR_PS = 230;
 const SR_INTENABLE = 228;
+// VECBASE (real Xtensa SR 231, e.g. <xtensa/config/specreg.h>) - the class
+// already carries a `vecbase` field (used by every raiseXxx() exception-
+// target calculation below), but WSR/RSR never exposed it to software at
+// all until now. A real, necessary gap, not just an over-restriction: every
+// real ESP-IDF binary's own startup code (call_start_cpu0) explicitly does
+// `wsr.vecbase` right after its own ENTRY, to relocate the exception vector
+// table from the boot-time default (VECBASE_RESET, pointing at nothing this
+// repo emulates) to the app's own IRAM-resident vector table - without this,
+// that write silently (well, not silently - it raised ILLEGAL) failed, so
+// the CPU kept computing every subsequent exception's target against the
+// stale boot-default vecbase, landing nowhere real.
+const SR_VECBASE = 231;
 
 interface PsSnapshot {
   excm: boolean;
@@ -255,6 +271,11 @@ function ctz32(x: number): number {
   }
   return n;
 }
+
+/** BEQI/BNEI/BLTI/BGEI's real constant table (Xtensa ISA's own b4const), confirmed against a real compiled binary's own uses. */
+const B4CONST = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256] as const;
+/** BLTUI/BGEUI's real constant table (b4constu) - identical to B4CONST except indices 0/1, which real hardware fills with 32768/65536 instead of -1/1 (values that only make sense unsigned). */
+const B4CONSTU = [32768, 65536, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 32, 64, 128, 256] as const;
 
 export class Cpu {
   pc: number;
@@ -309,6 +330,23 @@ export class Cpu {
    * runs CALLN immediately into a function whose first instruction is ENTRY.
    */
   private pendingCallinc: 0 | 1 | 2 | 3 = 0;
+
+  /**
+   * Plain read-what-you-last-wrote storage for special registers this repo
+   * doesn't give real behavior to (PS/INTENABLE/VECBASE above are the ones
+   * that do). Real hardware special registers RSR/WSR doesn't specifically
+   * back here (MEMCTL - instruction/data cache prefetch config - is the
+   * first one actually hit, by ESP-IDF's own startup code) configure real
+   * hardware behavior this repo doesn't model (cache, in MEMCTL's case) -
+   * exactly the same "unmapped access is a harmless no-op, not a fault"
+   * posture `SystemBus`'s own doc comment already documents for memory
+   * addresses, extended here to special registers. Software that reads
+   * back what it wrote (a common "save/restore cache config" pattern
+   * around a critical section) still sees consistent values; software
+   * that depends on the register's real hardware *effect* just silently
+   * doesn't get it, the same gap unmapped memory already has.
+   */
+  private readonly scratchSpecialRegs = new Map<number, number>();
 
   /** PS.INTLEVEL (0-7 used; ESP32 has levels 1-6 plus NMI at 7, unsupported here). */
   intlevel = 0;
@@ -464,9 +502,75 @@ export class Cpu {
     return (this.vecbase + VEC_WINDOW_UNDERFLOW[size]) >>> 0;
   }
 
+  /**
+   * Address -> JS handler, for real Espressif mask-ROM functions this repo
+   * doesn't (and realistically can't, without vendoring/re-implementing the
+   * actual ROM image) execute for real. ESP-IDF's own startup path
+   * (`call_start_cpu0` onward) calls a handful of these completely
+   * unconditionally, on every board, immediately after boot - with nothing
+   * mapped at their real fixed addresses (this repo's own "irom" region is
+   * just zero-initialized backing memory, not a real ROM dump), the very
+   * first such call faulted on an illegal/unmapped fetch.
+   *
+   * A handler runs entirely in the CALLER's own (unrotated) register
+   * window - real hardware only rotates the window inside a callee's own
+   * ENTRY, and a JS-native stub never executes one, so a2-a7 are exactly
+   * the caller's own argument registers, unshifted, matching CALLX4/8/12's
+   * real ABI. `returnFromStub()` (below) completes the call the same way a
+   * matching ENTRY-then-RETW pair would, minus the window rotation neither
+   * side ever needs.
+   */
+  readonly romStubs = new Map<number, () => void>();
+
+  /**
+   * Finishes a call intercepted via `romStubs`: reads the return address
+   * CALLN already stashed (in a4/a8/a12, per its own `callinc`) and jumps
+   * there directly - real hardware's ENTRY would additionally rotate the
+   * register window by that same `callinc`, but a stub that never
+   * allocates its own window has nothing to rotate away from.
+   *
+   * `returnValue`, if given, is written to the *caller's* register that
+   * physically becomes the callee's a2 once real hardware's ENTRY rotates
+   * the window by `callinc` quads - i.e. a10 for a callx8 (callinc=2, so
+   * a2+8), not literally register a2. Getting this wrong is easy to miss
+   * even having gotten everything else about this mechanism right: it was
+   * only caught by tracing a real call site (`callx8` immediately followed
+   * by `mov.n a6, a10` reading its result) and noticing the stub's return
+   * value landed in the wrong register entirely.
+   *
+   * The packed return-info value only carries the low 30 bits of the
+   * return PC (`callinc<<30 | (pc+3)&0x3fffffff` - see CALLN/CALLXN) - the
+   * top 2 bits are never stored at all, real hardware assumes a call and
+   * its return both land in the same 30-bit-addressable region, and
+   * reconstructs them from whatever's *currently* in PC (see RETW's own
+   * identical `(pc & 0xc0000000) | (a0 & 0x3fffffff)`, the reference this
+   * mirrors). At the point this runs, `this.pc` is still the stub's own
+   * ROM address, in the same region as the real call site, so this is
+   * exactly as valid here as it is for RETW.
+   */
+  returnFromStub(returnValue?: number): void {
+    const callinc = this.pendingCallinc;
+    const retInfo = this.regs.get(callinc << 2);
+    if (returnValue !== undefined) {
+      this.regs.set((callinc << 2) + 2, returnValue >>> 0);
+    }
+    this.pendingCallinc = 0;
+    this.pc = ((this.pc & 0xc0000000) | (retInfo & 0x3fffffff)) >>> 0;
+  }
+
   step(): void {
     this.lastException = null;
     const pc = this.pc;
+
+    const stub = this.romStubs.get(pc);
+    if (stub) {
+      // A plain CALLX8's own cost (CYCLE_COST['CALLX8']) - a stub replaces
+      // the callee's real body, not the call itself, so it's charged the
+      // same as any other single instruction, not left free.
+      stub();
+      this.accountCost(1n);
+      return;
+    }
 
     const interruptVector = this.checkInterrupts(pc);
     if (interruptVector !== null) {
@@ -488,6 +592,20 @@ export class Cpu {
       case 'SUB':
         this.regs.set(inst.dest, (this.regs.get(inst.src1) - this.regs.get(inst.src2)) >>> 0);
         break;
+      case 'ADDX2':
+      case 'ADDX4':
+      case 'ADDX8': {
+        const scale = inst.op === 'ADDX2' ? 1 : inst.op === 'ADDX4' ? 2 : 3;
+        this.regs.set(inst.dest, ((this.regs.get(inst.src1) << scale) + this.regs.get(inst.src2)) >>> 0);
+        break;
+      }
+      case 'SUBX2':
+      case 'SUBX4':
+      case 'SUBX8': {
+        const scale = inst.op === 'SUBX2' ? 1 : inst.op === 'SUBX4' ? 2 : 3;
+        this.regs.set(inst.dest, ((this.regs.get(inst.src1) << scale) - this.regs.get(inst.src2)) >>> 0);
+        break;
+      }
       case 'AND':
         this.regs.set(inst.dest, (this.regs.get(inst.src1) & this.regs.get(inst.src2)) >>> 0);
         break;
@@ -515,6 +633,16 @@ export class Cpu {
       case 'MULL':
         this.regs.set(inst.dest, Math.imul(this.regs.get(inst.src1), this.regs.get(inst.src2)) >>> 0);
         break;
+      case 'MULUH': {
+        const product = BigInt(this.regs.get(inst.src1) >>> 0) * BigInt(this.regs.get(inst.src2) >>> 0);
+        this.regs.set(inst.dest, Number((product >> 32n) & 0xffffffffn) >>> 0);
+        break;
+      }
+      case 'MULSH': {
+        const product = BigInt(this.regs.get(inst.src1) | 0) * BigInt(this.regs.get(inst.src2) | 0);
+        this.regs.set(inst.dest, Number((product >> 32n) & 0xffffffffn) >>> 0);
+        break;
+      }
       case 'QUOU':
       case 'QUOS':
       case 'REMU':
@@ -575,6 +703,14 @@ export class Cpu {
       case 'SRLI':
         this.regs.set(inst.dest, this.regs.get(inst.src) >>> inst.shift);
         break;
+      case 'EXTUI': {
+        // mask is always 1-16 (op2+1, op2 being 4 bits) - (1<<mask)-1 never
+        // needs the 32-bit-overflow special case a generic "mask width"
+        // helper would.
+        const maskBits = (1 << inst.mask) - 1;
+        this.regs.set(inst.dest, ((this.regs.get(inst.src) >>> inst.shift) & maskBits) >>> 0);
+        break;
+      }
       case 'SSR':
         this.sar = this.regs.get(inst.src) & 0x1f;
         break;
@@ -605,6 +741,30 @@ export class Cpu {
         this.bus.write32(addr, this.regs.get(inst.src));
         break;
       }
+      case 'L8UI': {
+        const addr = (this.regs.get(inst.base) + inst.offset) >>> 0;
+        this.regs.set(inst.dest, this.bus.readByte(addr));
+        break;
+      }
+      case 'L16UI':
+      case 'L16SI': {
+        const addr = (this.regs.get(inst.base) + inst.offset) >>> 0;
+        const raw = this.bus.readByte(addr) | (this.bus.readByte((addr + 1) >>> 0) << 8);
+        this.regs.set(inst.dest, inst.op === 'L16SI' ? ((raw << 16) >> 16) >>> 0 : raw);
+        break;
+      }
+      case 'S8I': {
+        const addr = (this.regs.get(inst.base) + inst.offset) >>> 0;
+        this.bus.writeByte(addr, this.regs.get(inst.src) & 0xff);
+        break;
+      }
+      case 'S16I': {
+        const addr = (this.regs.get(inst.base) + inst.offset) >>> 0;
+        const value = this.regs.get(inst.src);
+        this.bus.writeByte(addr, value & 0xff);
+        this.bus.writeByte((addr + 1) >>> 0, (value >>> 8) & 0xff);
+        break;
+      }
       case 'L32R': {
         const addr = (((pc + 3) & ~0x3) + inst.offset) >>> 0;
         this.regs.set(inst.dest, this.bus.read32(addr));
@@ -624,9 +784,61 @@ export class Cpu {
         nextPc = ((pc & ~0x3) + 4 + inst.offset) >>> 0;
         break;
       }
+      case 'CALLX0': {
+        // Indirect counterpart to CALL0 - same "a0 = return address" effect,
+        // just jumping to a register-held target instead of a PC-relative
+        // one (real hardware doesn't require word-alignment on the target
+        // here the way CALL0/CALLN's own PC-relative form does). Reads the
+        // target before writing a0, same "don't clobber before reading"
+        // reasoning as CALLXN below, even though a0 and the target register
+        // don't usually collide in real ABI code for this particular form.
+        const target = this.regs.get(inst.target) >>> 0;
+        this.regs.set(0, (pc + 3) >>> 0);
+        nextPc = target;
+        break;
+      }
+      case 'CALLXN': {
+        // Indirect counterpart to CALLN - identical return-info/pendingCallinc
+        // bookkeeping, just reading the call target from a register (loaded
+        // by the caller via L32R/MOV, e.g. a real ROM function's address or
+        // any C function pointer) rather than a PC-relative offset. Real
+        // ABI code's target register is conventionally the *same* register
+        // the return info is about to be written into (callx8's target is
+        // a8, the same a[callinc<<2] slot callinc=2 writes to) - reading
+        // the target before that write, not after, is load-bearing here,
+        // not stylistic: getting this backwards was a real bug found while
+        // bringing this instruction up at all (a fresh addition, not a
+        // regression) - it clobbered the call target with the return-info
+        // value before ever reading it, sending every indirect call
+        // somewhere near the vector table instead of its real destination.
+        const target = this.regs.get(inst.target) >>> 0;
+        const retInfo = ((inst.callinc << 30) | ((pc + 3) & 0x3fffffff)) >>> 0;
+        this.regs.set(inst.callinc << 2, retInfo);
+        this.pendingCallinc = inst.callinc;
+        nextPc = target;
+        break;
+      }
       case 'ENTRY': {
         // Real hardware restricts ENTRY's base register to a0-a3 (test_exceptions_entry).
-        if (inst.s > 3 || this.pendingCallinc === 0) {
+        // Deliberately does NOT also require pendingCallinc !== 0: PS.CALLINC
+        // is a real, plain 2-bit processor-state field with no "unset" state
+        // of its own - 0 is simply "no rotation", not an illegal encoding
+        // (win_helper.c's HELPER(entry)/translate_entry, the class's own
+        // reference above, never checks or faults on it either). A real bug
+        // this used to have: CALLN is the only thing that ever sets
+        // pendingCallinc away from its reset default of 0, but the very
+        // first ENTRY any program ever executes - the reset/entry vector's
+        // own function prologue, or any debugger-style direct PC injection
+        // (this repo's own Board.loadFirmware(), which jumps straight into
+        // the loaded ELF's entry point the same way a hardware debugger's
+        // "reset and run" does) - is never reached via a preceding CALLN,
+        // so pendingCallinc is still genuinely 0 there. Treating that as
+        // illegal meant *every* compiled program immediately double-faulted
+        // on its very first instruction, before main()/app_main() or
+        // anything else ever ran - found by single-stepping a real compiled
+        // ESP-IDF binary and watching it fault on step 1, at the entry
+        // point's own leading `entry a1, N`.
+        if (inst.s > 3) {
           nextPc = this.raiseIllegal(pc);
           break;
         }
@@ -721,7 +933,8 @@ export class Cpu {
       case 'RSR':
         if (inst.sr === SR_PS) this.regs.set(inst.reg, this.packPs());
         else if (inst.sr === SR_INTENABLE) this.regs.set(inst.reg, this.intenable >>> 0);
-        else nextPc = this.raiseIllegal(pc); // unbacked special register
+        else if (inst.sr === SR_VECBASE) this.regs.set(inst.reg, this.vecbase >>> 0);
+        else this.regs.set(inst.reg, this.scratchSpecialRegs.get(inst.sr) ?? 0); // unbacked - see scratchSpecialRegs
         break;
       case 'ADD_S':
         this.fpu.setFr(inst.dest, Math.fround(this.fpu.getFr(inst.src1) + this.fpu.getFr(inst.src2)));
@@ -780,8 +993,25 @@ export class Cpu {
       case 'WSR':
         if (inst.sr === SR_PS) this.unpackPs(this.regs.get(inst.reg));
         else if (inst.sr === SR_INTENABLE) this.intenable = this.regs.get(inst.reg) >>> 0;
-        else nextPc = this.raiseIllegal(pc);
+        else if (inst.sr === SR_VECBASE) this.vecbase = this.regs.get(inst.reg) >>> 0;
+        else this.scratchSpecialRegs.set(inst.sr, this.regs.get(inst.reg) >>> 0); // unbacked - see scratchSpecialRegs
         break;
+      case 'MOVEQZ':
+      case 'MOVNEZ':
+      case 'MOVLTZ':
+      case 'MOVGEZ': {
+        const cond = this.regs.get(inst.cond) | 0;
+        const taken =
+          inst.op === 'MOVEQZ'
+            ? cond === 0
+            : inst.op === 'MOVNEZ'
+              ? cond !== 0
+              : inst.op === 'MOVLTZ'
+                ? cond < 0
+                : cond >= 0;
+        if (taken) this.regs.set(inst.dest, this.regs.get(inst.src));
+        break;
+      }
       case 'BEQ':
       case 'BNE':
       case 'BLT':
@@ -799,10 +1029,61 @@ export class Cpu {
         if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
         break;
       }
+      case 'BLTU':
+      case 'BGEU': {
+        const a = this.regs.get(inst.a) >>> 0;
+        const b = this.regs.get(inst.b) >>> 0;
+        const taken = inst.op === 'BLTU' ? a < b : a >= b;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
+      case 'BNONE':
+      case 'BALL':
+      case 'BANY':
+      case 'BNALL': {
+        const a = this.regs.get(inst.a) >>> 0;
+        const b = this.regs.get(inst.b) >>> 0;
+        const masked = (a & b) >>> 0;
+        const taken =
+          inst.op === 'BNONE' ? masked === 0 : inst.op === 'BALL' ? masked === b : inst.op === 'BANY' ? masked !== 0 : masked !== b;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
       case 'BEQZ':
-      case 'BNEZ': {
+      case 'BNEZ':
+      case 'BLTZ':
+      case 'BGEZ': {
         const a = this.regs.get(inst.a) | 0;
-        const taken = inst.op === 'BEQZ' ? a === 0 : a !== 0;
+        const taken =
+          inst.op === 'BEQZ' ? a === 0 : inst.op === 'BNEZ' ? a !== 0 : inst.op === 'BLTZ' ? a < 0 : a >= 0;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
+      case 'BEQI':
+      case 'BNEI':
+      case 'BLTI':
+      case 'BGEI': {
+        // Signed comparisons against the b4const table - real hardware
+        // compares as signed 32-bit values here (unlike BLTUI/BGEUI below).
+        const a = this.regs.get(inst.a) | 0;
+        const b = B4CONST[inst.b4index]!;
+        const taken =
+          inst.op === 'BEQI' ? a === b : inst.op === 'BNEI' ? a !== b : inst.op === 'BLTI' ? a < b : a >= b;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
+      case 'BLTUI':
+      case 'BGEUI': {
+        const a = this.regs.get(inst.a) >>> 0;
+        const b = B4CONSTU[inst.b4index]!;
+        const taken = inst.op === 'BLTUI' ? a < b : a >= b;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
+      case 'BBCI':
+      case 'BBSI': {
+        const bitValue = (this.regs.get(inst.src) >>> inst.bit) & 1;
+        const taken = inst.op === 'BBCI' ? bitValue === 0 : bitValue === 1;
         if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
         break;
       }

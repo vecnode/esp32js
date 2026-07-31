@@ -58,10 +58,12 @@ export type Decoded =
   | { op: 'NOP' }
   | { op: 'ADD'; dest: number; src1: number; src2: number }
   | { op: 'SUB'; dest: number; src1: number; src2: number }
+  | { op: 'ADDX2' | 'ADDX4' | 'ADDX8' | 'SUBX2' | 'SUBX4' | 'SUBX8'; dest: number; src1: number; src2: number }
   | { op: 'AND' | 'OR' | 'XOR'; dest: number; src1: number; src2: number }
   | { op: 'NEG' | 'ABS'; dest: number; src: number }
   | { op: 'NSA' | 'NSAU'; dest: number; src: number }
   | { op: 'MULL'; dest: number; src1: number; src2: number }
+  | { op: 'MULUH' | 'MULSH'; dest: number; src1: number; src2: number }
   | { op: 'QUOU' | 'QUOS' | 'REMU' | 'REMS'; dest: number; src1: number; src2: number }
   | { op: 'ADDI'; dest: number; src: number; imm: number }
   | { op: 'MOV'; dest: number; src: number }
@@ -69,18 +71,25 @@ export type Decoded =
   | { op: 'SLL' | 'SRL' | 'SRA'; dest: number; src: number } // shift amount comes from SAR
   | { op: 'SRC'; dest: number; src1: number; src2: number } // funnel shift, also from SAR
   | { op: 'SLLI' | 'SRAI' | 'SRLI'; dest: number; src: number; shift: number }
+  | { op: 'EXTUI'; dest: number; src: number; shift: number; mask: number }
   | { op: 'SSR' | 'SSL'; src: number }
   | { op: 'SSAI'; shift: number }
   | { op: 'L32I'; dest: number; base: number; offset: number }
   | { op: 'S32I'; src: number; base: number; offset: number }
+  | { op: 'L8UI' | 'L16UI' | 'L16SI'; dest: number; base: number; offset: number }
+  | { op: 'S8I' | 'S16I'; src: number; base: number; offset: number }
   | { op: 'L32R'; dest: number; offset: number }
   | { op: 'L32E'; dest: number; base: number; offset: number }
   | { op: 'S32E'; src: number; base: number; offset: number }
   | { op: 'J'; offset: number }
-  | { op: 'BEQ' | 'BNE' | 'BLT' | 'BGE'; a: number; b: number; offset: number }
-  | { op: 'BEQZ' | 'BNEZ'; a: number; offset: number }
+  | { op: 'BEQ' | 'BNE' | 'BLT' | 'BGE' | 'BLTU' | 'BGEU' | 'BNONE' | 'BALL' | 'BANY' | 'BNALL'; a: number; b: number; offset: number }
+  | { op: 'BEQZ' | 'BNEZ' | 'BLTZ' | 'BGEZ'; a: number; offset: number }
+  | { op: 'BEQI' | 'BNEI' | 'BLTI' | 'BGEI' | 'BLTUI' | 'BGEUI'; a: number; b4index: number; offset: number }
+  | { op: 'BBCI' | 'BBSI'; src: number; bit: number; offset: number }
   | { op: 'CALL0'; offset: number }
   | { op: 'CALLN'; callinc: 1 | 2 | 3; offset: number }
+  | { op: 'CALLX0'; target: number }
+  | { op: 'CALLXN'; callinc: 1 | 2 | 3; target: number }
   | { op: 'ENTRY'; s: number; imm: number }
   | { op: 'RET' }
   | { op: 'RETW' }
@@ -90,6 +99,7 @@ export type Decoded =
   | { op: 'RFI'; level: number }
   | { op: 'RFE' }
   | { op: 'RSR' | 'WSR'; sr: number; reg: number }
+  | { op: 'MOVEQZ' | 'MOVNEZ' | 'MOVLTZ' | 'MOVGEZ'; dest: number; src: number; cond: number }
   | { op: 'ADD_S' | 'SUB_S' | 'MUL_S'; dest: number; src1: number; src2: number }
   | { op: 'MOV_S' | 'NEG_S' | 'ABS_S'; dest: number; src: number }
   | { op: 'WFR' | 'RFR'; dest: number; src: number }
@@ -153,11 +163,40 @@ export function decode(word: number): Decoded {
           if (s === 0x0) return { op: 'NEG', dest: r, src: t };
           if (s === 0x1) return { op: 'ABS', dest: r, src: t };
         }
+        // ADDX2/4/8, SUBX2/4/8: same dest=r/src1=s/src2=t shape as ADD/SUB
+        // above, computing dest = (src1<<n)+/-src2 - real hardware's own
+        // scaled-index-arithmetic op (array indexing: base + index*elemSize
+        // in one instruction). op2 continues ADD/SUB's own 8/c base values
+        // by 1/2/3 for the x2/x4/x8 scale, a real, clean, evenly-spaced
+        // sequence confirmed against several real compiled addx4/subx2/
+        // subx4/subx8 examples (addx2/addx8 extended from the same
+        // sequence, not independently seen yet, but the pattern is exact
+        // and well-documented enough elsewhere to trust here).
+        if (op2 === 0x9) return { op: 'ADDX2', dest: r, src1: s, src2: t };
+        if (op2 === 0xa) return { op: 'ADDX4', dest: r, src1: s, src2: t };
+        if (op2 === 0xb) return { op: 'ADDX8', dest: r, src1: s, src2: t };
+        if (op2 === 0xd) return { op: 'SUBX2', dest: r, src1: s, src2: t };
+        if (op2 === 0xe) return { op: 'SUBX4', dest: r, src1: s, src2: t };
+        if (op2 === 0xf) return { op: 'SUBX8', dest: r, src1: s, src2: t };
         if (op2 === 0x0) {
-          // RET/RETW: r=0, t=8/9 (m=2,n=0/1 per the generated decode tree)
+          // RET/RETW: r=0, t=8/9 (m=2,n=0/1 per the generated decode tree).
+          // CALLX0/CALLX4/CALLX8/CALLX12 (indirect windowed call, target in
+          // register s) share this same r=0 slot, distinguished by t=0xC-0xF
+          // (t = 0xC | callinc, callinc 0-3 selecting the 0/4/8/12 window
+          // increment - the same increment CALLN's own "n" prefix selects
+          // for the PC-relative form). This repo's own header comment
+          // already documented CALLN's PC-relative form as covered; the
+          // indirect form (used, among other things, for every call through
+          // a function pointer or into a ROM routine loaded via L32R - i.e.
+          // exactly how ESP-IDF's own startup code reaches its handful of
+          // real Espressif mask-ROM calls) was missing entirely until now,
+          // silently decoding as ILLEGAL and faulting the very first time
+          // any compiled program actually used one.
           if (r === 0x0) {
             if (t === 0x8) return { op: 'RET' };
             if (t === 0x9) return { op: 'RETW' };
+            if (t === 0xc) return { op: 'CALLX0', target: s };
+            if (t >= 0xd && t <= 0xf) return { op: 'CALLXN', callinc: (t & 0x3) as 1 | 2 | 3, target: s };
           }
           // RSIL: r=6 (fixed), dest=t, level=s (immediate 0-15)
           if (r === 0x6) return { op: 'RSIL', dest: t, level: s };
@@ -170,6 +209,34 @@ export function decode(word: number): Decoded {
             }
             if (t === 0x1) return { op: 'RFI', level: s };
           }
+          // BREAK (r=4, s/t are the two literal break-code immediates, not
+          // registers - "break 1,0" is exactly what ESP-IDF's own
+          // _xt_kernel_exc/_xt_panic entry points open with) - real
+          // hardware only actually traps into a debugger if one is
+          // attached via the OCD module; with none attached (this repo
+          // models no debug/OCD unit at all, the same "not modeled, not
+          // faked" posture as cache/MMU), BREAK is architecturally a
+          // no-op that just falls through to the next instruction. Found
+          // by tracing a real double-fault all the way back to its actual
+          // origin: every single exception this repo raised (divide-by-
+          // zero, illegal instruction, anything) correctly reached ESP-
+          // IDF's own real exception handler, which itself opens with
+          // this BREAK - meaning this one gap was silently turning every
+          // real exception into an immediate double-fault, masking
+          // whatever the original exception actually was.
+          if (r === 0x4) return { op: 'NOP' };
+          // r=2: memory/pipeline ordering family (ISYNC/RSYNC/ESYNC/DSYNC/
+          // EXCW/MEMW/EXTW, selected by t) - real hardware distinguishes
+          // these for pipeline/cache reordering guarantees; a sequential
+          // single-instruction-at-a-time interpreter like this one has no
+          // reordering to guard against in the first place, so all of them
+          // decode to the same no-op tag. MEMW specifically (t=0xc) is the
+          // one actually needed so far - real, common, unremarkable code
+          // (e.g. right after a register write feeding a peripheral,
+          // ESP-IDF's own rtc_vddsdio_get_config()) uses it constantly;
+          // decoding it as ILLEGAL faulted on some of the most ordinary
+          // compiled code there is, not anything exotic.
+          if (r === 0x2) return { op: 'NOP' };
         }
         if (op2 === 0x4) {
           // SSR/SSL: r=0/1 selects, src register = s. SSAI: r=4 (fixed), shift
@@ -186,6 +253,12 @@ export function decode(word: number): Decoded {
       if (op1 === 0x2) {
         // MULL (32x32->32 multiply) and the div32 family: r=dest, s=src1, t=src2.
         if (op2 === 0x8) return { op: 'MULL', dest: r, src1: s, src2: t };
+        // MULUH/MULSH (32x32->64 multiply, upper 32 bits) - confirmed
+        // against real compiled muluh/mulsh examples, filling the two
+        // op2 slots this family otherwise leaves free between MULL(8) and
+        // QUOU(0xc).
+        if (op2 === 0xa) return { op: 'MULUH', dest: r, src1: s, src2: t };
+        if (op2 === 0xb) return { op: 'MULSH', dest: r, src1: s, src2: t };
         if (op2 === 0xc) return { op: 'QUOU', dest: r, src1: s, src2: t };
         if (op2 === 0xd) return { op: 'QUOS', dest: r, src1: s, src2: t };
         if (op2 === 0xe) return { op: 'REMU', dest: r, src1: s, src2: t };
@@ -209,6 +282,22 @@ export function decode(word: number): Decoded {
           return { op: 'SRAI', dest: r, src: t, shift: ((op2 & 0x1) << 4) | s };
         }
       }
+      if (op1 === 0x4 || op1 === 0x5) {
+        // EXTUI (extract unsigned bit field): dest=r, src=t (opposite of
+        // most RRR ops, where t is usually the dest) - shiftimm is a 5-bit
+        // value split across op1's own LSB (its high bit) and s (its low
+        // 4 bits), maskimm is op2+1 (op2 is only 4 bits, encoding widths
+        // 1-16, never 0). Solved empirically against half a dozen examples
+        // pulled from a real compiled binary (shift/mask/dest/src all
+        // cross-checked against objdump's own disassembly of each one,
+        // not derived from a single example or guessed from partial
+        // documentation) after finding this instruction entirely
+        // unimplemented - a very ordinary bitfield-extraction op (register
+        // field reads, struct bitfields), not something exotic.
+        const shift = ((op1 & 0x1) << 4) | s;
+        const mask = op2 + 1;
+        return { op: 'EXTUI', dest: r, src: t, shift, mask };
+      }
       if (op1 === 0x9) {
         // L32E/S32E: r = immrx4 (4-bit magnitude, always a negative x4 offset)
         const offset = ((0xfffffff0 | r) << 2) | 0;
@@ -225,6 +314,17 @@ export function decode(word: number): Decoded {
         const sr = (r << 4) | s;
         if (op2 === 0x0) return { op: 'RSR', sr, reg: t };
         if (op2 === 0x1) return { op: 'WSR', sr, reg: t };
+        // MOVEQZ/MOVNEZ/MOVLTZ/MOVGEZ (conditional move): dest=r, the
+        // value moved on a true condition=s, the register tested=t -
+        // solved against several real compiled moveqz/movnez examples
+        // (MOVLTZ/MOVGEZ's op2 values follow the exact same op2=8..11
+        // sequence real Xtensa docs give the whole family, extended here
+        // by pattern rather than independently confirmed against an
+        // example, unlike every other opcode this class newly added).
+        if (op2 === 0x8) return { op: 'MOVEQZ', dest: r, src: s, cond: t };
+        if (op2 === 0x9) return { op: 'MOVNEZ', dest: r, src: s, cond: t };
+        if (op2 === 0xa) return { op: 'MOVLTZ', dest: r, src: s, cond: t };
+        if (op2 === 0xb) return { op: 'MOVGEZ', dest: r, src: s, cond: t };
       }
       if (op1 === 0xa) {
         // FP1 (single-precision arithmetic/conversion) family: r/s/t are
@@ -272,6 +372,18 @@ export function decode(word: number): Decoded {
         const raw12 = ((s << 8) | imm8) & 0xfff;
         return { op: 'MOVI', dest: t, imm: sext(raw12, 12) };
       }
+      // L8UI/L16UI/L16SI/S8I/S16I: same shape as L32I/S32I above, just a
+      // narrower (byte/half-word) memory access - L8UI/S8I's offset is the
+      // raw imm8 (no scaling, matching L32I doc), L16UI/L16SI/S16I's is
+      // imm8*2 (confirmed against real l8ui/l16ui examples pulled from a
+      // compiled binary; S8I/S16I extended from the exact same r-value
+      // sequence real Xtensa docs give this whole family, not
+      // independently confirmed against an example the way the loads are).
+      if (r === 0x0) return { op: 'L8UI', dest: t, base: s, offset: imm8 };
+      if (r === 0x1) return { op: 'L16UI', dest: t, base: s, offset: imm8 << 1 };
+      if (r === 0x9) return { op: 'L16SI', dest: t, base: s, offset: imm8 << 1 };
+      if (r === 0x4) return { op: 'S8I', src: t, base: s, offset: imm8 };
+      if (r === 0x5) return { op: 'S16I', src: t, base: s, offset: imm8 << 1 };
       break;
 
     case 0x5: { // CALL0/CALL4/CALL8/CALL12, selected by n; offset in units of 4
@@ -281,10 +393,40 @@ export function decode(word: number): Decoded {
       return { op: 'CALLN', callinc: n as 1 | 2 | 3, offset };
     }
 
-    case 0x6: // J (n=0), ENTRY (n=3,m=0); BEQZ/BNEZ/.../LOOP (n=1,2 or n=3,m!=0) not covered
+    case 0x6: // J (n=0); BEQZ/etc (n=1); BEQI/etc (n=2); ENTRY/BT-BF/BLTUI/BGEUI (n=3)
       if (n === 0) {
         const off18 = (word >>> 6) & 0x3ffff;
         return { op: 'J', offset: sext(off18, 18) };
+      }
+      if (n === 1) {
+        // BEQZ/BNEZ/BLTZ/BGEZ ("BZ" format): s = the compared register, m
+        // selects the condition (0..3, same EQ/NE/LT/GE order as n=2's own
+        // BEQI/BNEI/BLTI/BGEI below - the two families share this ordering
+        // throughout the real ISA), offset is a 12-bit signed immediate
+        // (not imm8 - this family's own displacement field is wider).
+        // Previously entirely undecoded (this class's own type already
+        // existed, and cpu.ts already had a real BEQZ/BNEZ execute case
+        // for it, but nothing ever produced one) - found by tracing a real
+        // compiled binary into a plain, ordinary `bnez a10, ...` bounds
+        // check and watching it fall through to ILLEGAL.
+        const offset = sext(imm12, 12);
+        const ops = ['BEQZ', 'BNEZ', 'BLTZ', 'BGEZ'] as const;
+        return { op: ops[m]!, a: s, offset };
+      }
+      if (n === 2) {
+        // BEQI/BNEI/BLTI/BGEI ("BRI12"-ish immediate-compare family, m
+        // selects the condition): s = the compared register, r = an index
+        // into the b4const table (cpu.ts) rather than a raw immediate -
+        // real hardware picks from {-1,1,2,3,4,5,6,7,8,10,12,16,32,64,128,
+        // 256} instead of encoding an arbitrary signed value, since these
+        // are meant for common small-constant comparisons a compiler emits
+        // constantly (loop bounds, small enum/flag checks) - confirmed
+        // against a real compiled binary's own beqi/bnei/blti/bgei uses,
+        // matching this m-assignment and the table's values exactly for
+        // every one of them, not just one example.
+        const offset = sext(imm8, 8);
+        const ops = ['BEQI', 'BNEI', 'BLTI', 'BGEI'] as const;
+        return { op: ops[m]!, a: s, b4index: r, offset };
       }
       if (n === 3 && m === 0) {
         // ENTRY: s = bits[11:8] (must be a0-a3 on real hardware), imm = bits[23:12] * 8
@@ -298,6 +440,19 @@ export function decode(word: number): Decoded {
         // xtensa-modules.inc.c: base encoding 0x001076/0x000076).
         return { op: r === 0x1 ? 'BT' : 'BF', src: s, offset: sext(imm8, 8) };
       }
+      if (n === 3 && (m === 2 || m === 3)) {
+        // BLTUI/BGEUI: same shape as BEQI/etc above, but comparing against
+        // the b4constu table (unsigned) instead of b4const (signed) - real
+        // hardware fills the two slots that wouldn't make sense unsigned
+        // (b4const's -1 and 1) with 32768 and 65536 instead, real values
+        // used by real compiler idioms (b4constu[0]=32768 tests a value's
+        // sign bit when reinterpreted as unsigned, b4constu[1]=65536 tests
+        // for anything beyond 16 bits) - completing op0=6's n=3 slot
+        // exactly (m=0 ENTRY, m=1 BT/BF, m=2/3 here), confirmed against a
+        // real compiled binary's own bltui/bgeui uses.
+        const offset = sext(imm8, 8);
+        return { op: m === 2 ? 'BLTUI' : 'BGEUI', a: s, b4index: r, offset };
+      }
       break;
 
     case 0x7: { // BRI8 conditional branches: r selects condition, imm8 = signed displacement
@@ -306,6 +461,31 @@ export function decode(word: number): Decoded {
       if (r === 0x9) return { op: 'BNE', a: s, b: t, offset };
       if (r === 0x2) return { op: 'BLT', a: s, b: t, offset };
       if (r === 0xa) return { op: 'BGE', a: s, b: t, offset };
+      // BLTU/BGEU: unsigned register-vs-register counterparts to BLT/BGE,
+      // continuing this family's own r-value sequence (confirmed against
+      // several real compiled bltu/bgeu examples) - previously only the
+      // immediate-vs-constant forms (BLTUI/BGEUI) existed.
+      if (r === 0x3) return { op: 'BLTU', a: s, b: t, offset };
+      if (r === 0xb) return { op: 'BGEU', a: s, b: t, offset };
+      // BNONE/BALL/BANY/BNALL (bitwise mask test branches), evenly spaced
+      // by 4 in this family's own r sequence - confirmed against several
+      // real compiled examples of each.
+      if (r === 0x0) return { op: 'BNONE', a: s, b: t, offset };
+      if (r === 0x4) return { op: 'BALL', a: s, b: t, offset };
+      if (r === 0x8) return { op: 'BANY', a: s, b: t, offset };
+      if (r === 0xc) return { op: 'BNALL', a: s, b: t, offset };
+      if ((r & 0x6) === 0x6) {
+        // BBCI/BBSI (branch if bit clear/set immediate): r's bits[2:1] are
+        // fixed "11" (this family's own identifying bits, checked above),
+        // bit3 selects BBCI(0)/BBSI(1), and bit0 supplies the bit index's
+        // 5th bit (bitindex = t | ((r&1)<<4), t alone only reaching 0-15) -
+        // solved empirically against 6 real examples pulled from a compiled
+        // binary (3 BBCI, 2 BBSI, one deliberately with a small in-range
+        // index to rule out the low-4-bits-only case), not derived from a
+        // single example or guessed from partial memory of the ISA.
+        const bit = t | ((r & 0x1) << 4);
+        return { op: (r >>> 3) & 0x1 ? 'BBSI' : 'BBCI', src: s, bit, offset };
+      }
       break;
     }
 
