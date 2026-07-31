@@ -64,7 +64,7 @@
  * observe what happened (if anything) via `Cpu.lastException`.
  */
 
-import { decode } from './decode.js';
+import { decode, instructionLength } from './decode.js';
 import type { RegisterFile } from './registers.js';
 
 export interface Bus {
@@ -78,9 +78,6 @@ export type ExceptionCause =
   | { kind: 'double' }
   | { kind: 'window-overflow'; size: 4 | 8 | 12 }
   | { kind: 'window-underflow'; size: 4 | 8 | 12 };
-
-/** Instruction width in bytes; this decoder covers 24-bit instructions only. */
-const INSN_LEN = 3;
 
 /** VECBASE's hardware reset value (XCHAL_VECBASE_RESET_VADDR, core-isa.h). */
 const VECBASE_RESET = 0x40000000;
@@ -166,15 +163,24 @@ export class Cpu {
   step(): void {
     this.lastException = null;
     const pc = this.pc;
-    const inst = decode(this.fetch24(pc));
-    let nextPc = (pc + INSN_LEN) >>> 0;
+    const word = this.fetch24(pc);
+    const inst = decode(word);
+    let nextPc = (pc + instructionLength(word)) >>> 0;
 
     switch (inst.op) {
+      case 'NOP':
+        break;
       case 'ADD':
         this.regs.set(inst.dest, (this.regs.get(inst.src1) + this.regs.get(inst.src2)) >>> 0);
         break;
       case 'SUB':
         this.regs.set(inst.dest, (this.regs.get(inst.src1) - this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'ADDI':
+        this.regs.set(inst.dest, (this.regs.get(inst.src) + inst.imm) >>> 0);
+        break;
+      case 'MOV':
+        this.regs.set(inst.dest, this.regs.get(inst.src));
         break;
       case 'MOVI':
         this.regs.set(inst.dest, inst.imm >>> 0);
@@ -293,6 +299,13 @@ export class Cpu {
               : inst.op === 'BLT'
                 ? a < b
                 : a >= b;
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
+      case 'BEQZ':
+      case 'BNEZ': {
+        const a = this.regs.get(inst.a) | 0;
+        const taken = inst.op === 'BEQZ' ? a === 0 : a !== 0;
         if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
         break;
       }

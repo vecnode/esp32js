@@ -26,6 +26,12 @@ class TestBus implements Bus {
     this.mem[addr + 1] = (word >>> 8) & 0xff;
     this.mem[addr + 2] = (word >>> 16) & 0xff;
   }
+
+  /** For density (16-bit) instructions, packed 2 bytes apart - writeInsn's 3-byte write would clobber the next one. */
+  writeInsn16(addr: number, word: number): void {
+    this.mem[addr] = word & 0xff;
+    this.mem[addr + 1] = (word >>> 8) & 0xff;
+  }
 }
 
 const ADD = (dest: number, s1: number, s2: number) => (0x8 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
@@ -55,6 +61,17 @@ const RFWU = 0x003500;
 const branch = (r: number, a: number, b: number, offset: number) => ((offset & 0xff) << 16) | (r << 12) | (a << 8) | (b << 4) | 0x7;
 const BEQ = (a: number, b: number, offset: number) => branch(0x1, a, b, offset);
 const BLT = (a: number, b: number, offset: number) => branch(0x2, a, b, offset);
+
+// Density (16-bit) encoders.
+const ADD_N = (dest: number, s1: number, s2: number) => (dest << 12) | (s1 << 8) | (s2 << 4) | 0xa;
+const ADDI_N = (dest: number, src: number, rawT: number) => (dest << 12) | (src << 8) | (rawT << 4) | 0xb;
+const MOVI_N = (dest: number, raw7: number) => (((raw7 & 0xf) << 12) | (dest << 8) | (((raw7 >> 4) & 0x7) << 4) | 0xc) >>> 0;
+const BEQZ_N = (a: number, raw6: number) => (((raw6 & 0xf) << 12) | (a << 8) | (((raw6 >> 4) & 0x3) << 4) | (1 << 7) | 0xc) >>> 0;
+const BNEZ_N = (a: number, raw6: number) => (BEQZ_N(a, raw6) | (1 << 6)) >>> 0;
+const MOV_N = (dest: number, src: number) => (src << 8) | (dest << 4) | 0xd;
+const RET_N = (0xf << 12) | (0 << 4) | 0xd;
+const NOP_N = (0xf << 12) | (0 << 8) | (3 << 4) | 0xd;
+const L32I_N = (dest: number, base: number, byteOffset: number) => (((byteOffset >> 2) << 12) | (base << 8) | (dest << 4) | 0x8) >>> 0;
 
 function makeCpu(): { cpu: Cpu; bus: TestBus } {
   const bus = new TestBus();
@@ -333,5 +350,114 @@ describe('Cpu fetch/execute', () => {
     bus.writeInsn(0, 0xdead0f);
     cpu.step();
     expect(cpu.lastException).toEqual({ kind: 'illegal' });
+  });
+
+  describe('density (16-bit) instructions', () => {
+    it('advances pc by 2 (not 3) for a density instruction, and mixes with 24-bit ones', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(2, 5)); // a2 = 5, 2 bytes
+      bus.writeInsn16(2, ADD_N(4, 2, 2)); // a4 = a2 + a2, 2 bytes
+      bus.writeInsn(4, ADD(5, 4, 4)); // a5 = a4 + a4, back to a 3-byte instruction
+
+      cpu.step();
+      expect(cpu.pc).toBe(2);
+      expect(cpu.regs.get(2)).toBe(5);
+
+      cpu.step();
+      expect(cpu.pc).toBe(4);
+      expect(cpu.regs.get(4)).toBe(10);
+
+      cpu.step();
+      expect(cpu.pc).toBe(7);
+      expect(cpu.regs.get(5)).toBe(20);
+    });
+
+    it('decodes and runs MOVI.N with the asymmetric negative range', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(3, 0x60)); // raw7=0x60 -> -32
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe((-32) >>> 0);
+    });
+
+    it('runs ADDI.N, including the raw-0 -> -1 special case', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(1, 10));
+      bus.writeInsn16(2, ADDI_N(2, 1, 3)); // a2 = a1 + 3
+      bus.writeInsn16(4, ADDI_N(3, 1, 0)); // a3 = a1 + (-1)
+
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe(13);
+      expect(cpu.regs.get(3)).toBe(9);
+    });
+
+    it('runs MOV.N as a plain register copy', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(5, 21));
+      bus.writeInsn16(2, MOV_N(6, 5));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(6)).toBe(21);
+    });
+
+    it('runs NOP.N: no register change, pc advances by 2', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, NOP_N);
+      cpu.step();
+      expect(cpu.pc).toBe(2);
+      expect(cpu.lastException).toBeNull();
+    });
+
+    it('BEQZ.N branches to pc+4+offset when the register is zero', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, BEQZ_N(2, 20)); // a2 defaults to 0
+
+      cpu.step();
+      expect(cpu.pc).toBe(0 + 4 + 20);
+    });
+
+    it('BEQZ.N falls through when the register is not zero', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(2, 1));
+      bus.writeInsn16(2, BEQZ_N(2, 20));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.pc).toBe(4); // straight-line fallthrough, 2-byte instruction
+    });
+
+    it('BNEZ.N branches when the register is not zero', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn16(0, MOVI_N(2, 1));
+      bus.writeInsn16(2, BNEZ_N(2, 20));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.pc).toBe(2 + 4 + 20);
+    });
+
+    it('round-trips a value through S32I.N/L32I.N', () => {
+      const { cpu, bus } = makeCpu();
+      const S32I_N = (src: number, base: number, byteOffset: number) => (((byteOffset >> 2) << 12) | (base << 8) | (src << 4) | 0x9) >>> 0;
+      bus.writeInsn16(0, MOVI_N(2, 0x40)); // base = 64
+      bus.writeInsn16(2, MOVI_N(3, 42));
+      bus.writeInsn16(4, S32I_N(3, 2, 8));
+      bus.writeInsn16(6, L32I_N(4, 2, 8));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(4)).toBe(42);
+    });
+
+    it('reuses RET for RET.N (op0=13,r=15,t=0)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, CALL0(12)); // a0 = 3, pc -> 16
+      bus.writeInsn16(16, RET_N);
+
+      cpu.step(); // CALL0
+      cpu.step(); // RET.N
+      expect(cpu.pc).toBe(3);
+    });
   });
 });
