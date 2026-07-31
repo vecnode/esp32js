@@ -36,6 +36,14 @@
  * itself, a driver calls `cpu.step(); bus.tick(cpu.lastStepCycles)` once per
  * step.
  *
+ * Unlike `intmatrix.attach(cpu)` (which needs a `Cpu` the embedder
+ * constructs separately), TIMG0's `onInterruptChange`/`onWdtReset`
+ * callbacks are wired here in the constructor, since `SystemBus` already
+ * owns both ends: T0/T1/WDT's interrupt conditions route to
+ * `IntMatrix.setSourceLevel` at their real `INTMATRIX_SOURCE.TG0_*` index,
+ * and a WDT timeout configured as CPU/system-reset routes to
+ * `RtcCntl.triggerWdtReset`.
+ *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
  *   - Every other peripheral block in `PERIPHERAL_BASE` besides
  *     UART0/GPIO/TIMG0/RTC_CNTL/DPORT/IO_MUX/SENS isn't backed at all -
@@ -54,7 +62,7 @@
 import type { Bus } from '../cpu/cpu.js';
 import { Adc, ADC_WINDOW_SIZE } from '../peripherals/adc.js';
 import { Gpio, GPIO_WINDOW_SIZE } from '../peripherals/gpio.js';
-import { IntMatrix, INTMATRIX_WINDOW_SIZE } from '../peripherals/intmatrix.js';
+import { IntMatrix, INTMATRIX_SOURCE, INTMATRIX_WINDOW_SIZE } from '../peripherals/intmatrix.js';
 import { IoMux, IOMUX_WINDOW_SIZE } from '../peripherals/iomux.js';
 import { Timg, TIMG_WINDOW_SIZE } from '../peripherals/timer.js';
 import { Uart0, UART_WINDOW_SIZE } from '../peripherals/uart.js';
@@ -106,6 +114,16 @@ export class SystemBus implements Bus {
       { base: PERIPHERAL_BASE.ioMux, size: IOMUX_WINDOW_SIZE, device: this.ioMux },
       { base: PERIPHERAL_BASE.sens, size: ADC_WINDOW_SIZE, device: this.adc },
     ];
+
+    // TIMG0's T0/T1/WDT interrupt sources -> the interrupt matrix, and a WDT
+    // timeout configured as CPU/system-reset -> RTC_CNTL's reset-cause
+    // tracking - same wiring shape as intmatrix.attach(cpu), just for
+    // peripheral-to-peripheral callbacks SystemBus already owns both ends of.
+    this.timg0.onInterruptChange = (source, active) => {
+      const matrixSource = source === 'T0' ? INTMATRIX_SOURCE.TG0_T0 : source === 'T1' ? INTMATRIX_SOURCE.TG0_T1 : INTMATRIX_SOURCE.TG0_WDT;
+      this.intmatrix.setSourceLevel(matrixSource, active ? 1 : 0);
+    };
+    this.timg0.onWdtReset = (kind) => this.rtcCntl.triggerWdtReset(kind === 'cpu' ? 'cpu' : 'sys');
   }
 
   /** Copy `data` into `region` starting at `offset` - for preloading a firmware image or test fixture. */
