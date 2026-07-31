@@ -7,6 +7,8 @@ import { UART_REG } from '../../src/peripherals/uart.js';
 import { GPIO_REG } from '../../src/peripherals/gpio.js';
 import { TIMG_REG } from '../../src/peripherals/timer.js';
 import { INTMATRIX_SOURCE } from '../../src/peripherals/intmatrix.js';
+import { RESET_CAUSE, RTC_CNTL_REG } from '../../src/soc/rtc_cntl.js';
+import { DPORT_REG } from '../../src/soc/dport.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -290,6 +292,67 @@ describe('SystemBus', () => {
 
       cpu.step();
       expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+    });
+  });
+
+  describe('RTC_CNTL / DPORT dispatch', () => {
+    it('routes a 32-bit write/read to RTC_CNTL_STORE0', () => {
+      const bus = new SystemBus();
+      const addr = PERIPHERAL_BASE.rtcCntl + RTC_CNTL_REG.STORE0;
+      bus.write32(addr, 0xcafef00d);
+      expect(bus.read32(addr)).toBe(0xcafef00d >>> 0);
+    });
+
+    it('routes a 32-bit write/read to DPORT_APPCPU_BOOT_ADDR', () => {
+      const bus = new SystemBus();
+      const addr = PERIPHERAL_BASE.dport + DPORT_REG.APPCPU_BOOT_ADDR;
+      bus.write32(addr, MEMORY_MAP.iram.base);
+      expect(bus.read32(addr)).toBe(MEMORY_MAP.iram.base);
+    });
+
+    it("DPORT's own registers and the interrupt matrix coexist in DPORT's window without colliding", () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.dport + DPORT_REG.CPU_PER_CONF, 0xffffffff);
+      const intmatrixAddr = PERIPHERAL_BASE.dport + 0x104 + INTMATRIX_SOURCE.UART0 * 4;
+      expect(bus.read32(intmatrixAddr)).toBe(6); // intmatrix's own reset default, untouched
+    });
+
+    it('runs a real boot idiom: read RESET_STATE, then trigger a software reset via S32I', () => {
+      const bus = new SystemBus();
+      const base = MEMORY_MAP.iram.base;
+      const MOVI = (dest: number, imm: number) => {
+        const raw12 = imm & 0xfff;
+        const s = (raw12 >> 8) & 0xf;
+        const imm8 = raw12 & 0xff;
+        return (imm8 << 16) | (0xa << 12) | (s << 8) | (dest << 4) | 0x2;
+      };
+      const L32I = (dest: number, base_: number, byteOffset: number) => (((byteOffset >> 2) & 0xff) << 16) | (0x2 << 12) | (base_ << 8) | (dest << 4) | 0x2;
+      const S32I = (src: number, base_: number, byteOffset: number) => (((byteOffset >> 2) & 0xff) << 16) | (0x6 << 12) | (base_ << 8) | (src << 4) | 0x2;
+      const writeInsn = (addr: number, word: number) => {
+        bus.writeByte(addr, word & 0xff);
+        bus.writeByte(addr + 1, (word >>> 8) & 0xff);
+        bus.writeByte(addr + 2, (word >>> 16) & 0xff);
+      };
+
+      let resetFired: string | undefined;
+      bus.rtcCntl.onReset = (cause) => (resetFired = cause);
+
+      const resetStateAddr = PERIPHERAL_BASE.rtcCntl + RTC_CNTL_REG.RESET_STATE;
+      const options0Addr = PERIPHERAL_BASE.rtcCntl + RTC_CNTL_REG.OPTIONS0;
+      const cpu = new Cpu(new RegisterFile(), bus, base);
+      cpu.regs.set(1, resetStateAddr); // far outside MOVI's 12-bit range
+      cpu.regs.set(2, options0Addr);
+      cpu.regs.set(4, 1 << 5); // SW_PROCPU_RESET
+
+      writeInsn(base, L32I(3, 1, 0)); // a3 = RESET_STATE (esp_reset_reason() idiom)
+      writeInsn(base + 3, S32I(4, 2, 0)); // trigger a software PROCPU reset
+
+      cpu.step();
+      expect(cpu.regs.get(3) & 0x3f).toBe(RESET_CAUSE.POWERON_RESET); // reads real POWERON cause first
+
+      cpu.step();
+      expect(resetFired).toBe('procpu');
+      expect(bus.rtcCntl.readWord(RTC_CNTL_REG.RESET_STATE) & 0x3f).toBe(RESET_CAUSE.SW_CPU_RESET);
     });
   });
 });
