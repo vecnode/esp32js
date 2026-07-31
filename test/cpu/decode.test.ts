@@ -401,4 +401,37 @@ describe('decode', () => {
       expect(decode(word)).toEqual({ op: name, dest: 4, src1: 1, src2: 2 });
     });
   });
+
+  describe('interrupt-related instructions', () => {
+    it('decodes RSIL (op1=0,op2=0,r=6), dest=t, level=s', () => {
+      const word = rrr(0x0, 0x0, 6, 3, 4);
+      expect(decode(word)).toEqual({ op: 'RSIL', dest: 4, level: 3 });
+    });
+
+    it('decodes RFI (op1=0,op2=0,r=3,t=1), level=s', () => {
+      const word = rrr(0x0, 0x0, 3, 5, 1);
+      expect(decode(word)).toEqual({ op: 'RFI', level: 5 });
+    });
+
+    it('does not confuse RFI (t=1) with RFWO/RFWU (t=0)', () => {
+      const rfwo = rrr(0x0, 0x0, 3, 4, 0);
+      const rfwu = rrr(0x0, 0x0, 3, 5, 0);
+      expect(decode(rfwo)).toEqual({ op: 'RFWO' });
+      expect(decode(rfwu)).toEqual({ op: 'RFWU' });
+    });
+
+    it('decodes RSR.PS/WSR.PS (SR=230=0xE6 -> r=0xE,s=6)', () => {
+      const rsr = rrr(0x0, 0x3, 0xe, 6, 2);
+      const wsr = rrr(0x1, 0x3, 0xe, 6, 2);
+      expect(decode(rsr)).toEqual({ op: 'RSR', sr: 230, reg: 2 });
+      expect(decode(wsr)).toEqual({ op: 'WSR', sr: 230, reg: 2 });
+    });
+
+    it('decodes RSR.INTENABLE/WSR.INTENABLE (SR=228=0xE4 -> r=0xE,s=4)', () => {
+      const rsr = rrr(0x0, 0x3, 0xe, 4, 5);
+      const wsr = rrr(0x1, 0x3, 0xe, 4, 5);
+      expect(decode(rsr)).toEqual({ op: 'RSR', sr: 228, reg: 5 });
+      expect(decode(wsr)).toEqual({ op: 'WSR', sr: 228, reg: 5 });
+    });
+  });
 });

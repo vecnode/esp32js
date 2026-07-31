@@ -84,6 +84,12 @@ const ENTRY = (s: number, byteImm: number) => (((byteImm >> 3) & 0xfff) << 12) |
 const RETW = 0x000090;
 const RFWO = 0x003400;
 const RFWU = 0x003500;
+const RSIL = (dest: number, level: number) => (0x6 << 12) | ((level & 0xf) << 8) | (dest << 4);
+const RFI = (level: number) => (0x3 << 12) | ((level & 0xf) << 8) | (1 << 4);
+const RSR = (sr: number, reg: number) => (0x3 << 16) | (((sr >> 4) & 0xf) << 12) | ((sr & 0xf) << 8) | (reg << 4);
+const WSR = (sr: number, reg: number) => (0x1 << 20) | (0x3 << 16) | (((sr >> 4) & 0xf) << 12) | ((sr & 0xf) << 8) | (reg << 4);
+const SR_PS = 230;
+const SR_INTENABLE = 228;
 const branch = (r: number, a: number, b: number, offset: number) => ((offset & 0xff) << 16) | (r << 12) | (a << 8) | (b << 4) | 0x7;
 const BEQ = (a: number, b: number, offset: number) => branch(0x1, a, b, offset);
 const BLT = (a: number, b: number, offset: number) => branch(0x2, a, b, offset);
@@ -735,6 +741,130 @@ describe('Cpu fetch/execute', () => {
       expect(cpu.lastException).toEqual({ kind: 'divide-by-zero' });
       expect(cpu.pc).toBe(cpu.vecbase + 0x300);
       expect(cpu.regs.get(3)).toBe(0); // untouched - the divide never ran
+    });
+  });
+
+  describe('interrupt delivery', () => {
+    it('delivers a level-1 interrupt through the shared exception path, preempting the pending instruction', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 5)); // should NOT execute this step
+      cpu.intenable = 1 << 0; // CPU line 0 is level 1 (XCHAL_INT0_LEVEL)
+      cpu.setInterruptLine(0, true);
+
+      cpu.step();
+
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x300);
+      expect(cpu.epc1).toBe(0);
+      expect(cpu.excm).toBe(true);
+      expect(cpu.regs.get(1)).toBe(0); // MOVI never ran
+    });
+
+    it('a line with INTENABLE=0 never interrupts', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 5));
+      cpu.setInterruptLine(0, true); // intenable stays 0
+
+      cpu.step();
+      expect(cpu.lastException).toBeNull();
+      expect(cpu.regs.get(1)).toBe(5);
+    });
+
+    it('PS.EXCM raises the effective level to EXCM_LEVEL(3), blocking level<=3 interrupts', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 5));
+      cpu.excm = true; // as if already inside an exception/interrupt handler
+      cpu.intenable = 1 << 19; // line 19 is level 2 (XCHAL_INT19_LEVEL)
+      cpu.setInterruptLine(19, true);
+
+      cpu.step();
+      expect(cpu.lastException).toBeNull();
+      expect(cpu.regs.get(1)).toBe(5);
+    });
+
+    it('delivers and returns from a level-2 interrupt via RFI', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400; // keep vectors within TestBus's small backing array
+      bus.writeInsn(0, MOVI(1, 5)); // preempted by the interrupt
+      bus.writeInsn(cpu.vecbase + 0x180, RFI(2)); // XCHAL_INTLEVEL2_VECOFS
+
+      cpu.intenable = 1 << 19;
+      cpu.setInterruptLine(19, true);
+
+      cpu.step(); // interrupt taken
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 2 });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x180);
+      expect(cpu.intlevel).toBe(2);
+      expect(cpu.excm).toBe(true);
+
+      cpu.setInterruptLine(19, false); // the "ISR" services and clears its peripheral's condition
+
+      cpu.step(); // RFI 2
+      expect(cpu.pc).toBe(0);
+      expect(cpu.intlevel).toBe(0);
+      expect(cpu.excm).toBe(false);
+      expect(cpu.lastException).toBeNull();
+
+      cpu.step(); // MOVI now runs for real, back at the original pc
+      expect(cpu.regs.get(1)).toBe(5);
+    });
+
+    it('a higher-level interrupt preempts a lower one already in progress', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400;
+      bus.writeInsn(cpu.vecbase + 0x180, MOVI(2, 1)); // level-2 handler body (never reached)
+      bus.writeInsn(cpu.vecbase + 0x200, MOVI(3, 1)); // level-4 handler (XCHAL_INT24_LEVEL)
+
+      cpu.intenable = (1 << 19) | (1 << 24);
+      cpu.setInterruptLine(19, true);
+      cpu.step(); // level 2 taken
+      expect(cpu.intlevel).toBe(2);
+
+      cpu.setInterruptLine(24, true);
+      cpu.step(); // level 4 preempts (4 > cintlevel, which is 3 here: EXCM_LEVEL dominates intlevel=2)
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 4 });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x200);
+      expect(cpu.intlevel).toBe(4);
+      expect(cpu.regs.get(2)).toBe(0); // the level-2 handler's body never ran
+    });
+
+    it('RSIL raises PS.INTLEVEL and returns the old packed PS value', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, RSIL(2, 3));
+      cpu.step();
+      expect(cpu.intlevel).toBe(3);
+      expect(cpu.regs.get(2) & 0xf).toBe(0); // old INTLEVEL, before this RSIL, was 0
+    });
+
+    it('WSR.PS/RSIL round-trip a full packed PS value (critical-section raise/restore)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, RSIL(2, 5)); // save old PS in a2, raise to level 5
+      bus.writeInsn(3, WSR(SR_PS, 2)); // restore it
+
+      cpu.step();
+      expect(cpu.intlevel).toBe(5);
+      cpu.step();
+      expect(cpu.intlevel).toBe(0);
+    });
+
+    it('WSR.INTENABLE/RSR.INTENABLE round-trip the interrupt-enable mask', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0x123));
+      bus.writeInsn(3, WSR(SR_INTENABLE, 1));
+      bus.writeInsn(6, RSR(SR_INTENABLE, 2));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.intenable).toBe(0x123);
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe(0x123);
+    });
+
+    it('RSR/WSR on an unbacked special register is illegal', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, RSR(1, 2)); // SR=1 is neither PS(230) nor INTENABLE(228)
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'illegal' });
     });
   });
 });
