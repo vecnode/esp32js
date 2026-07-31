@@ -11,15 +11,19 @@
  *
  * The reference paces everything against `qemu_clock_get_ns` (real elapsed
  * wall-clock time) and fires alarms/timeouts via `QEMUTimer` callbacks at a
- * precomputed absolute time. This interpreter has no wall clock - instead,
- * `advance(cycles)` is a *polled* model: a driver (see `soc/bus.ts`'s
- * `tick()`) calls it once per `Cpu.step()` with that step's approximated
- * cycle cost (`cpu/cpu.ts`'s `Cpu.cycles`/`CYCLE_COST` - itself an honest
- * approximation, not real silicon timing). One "cycle" here is treated as
- * one APB clock cycle for the purposes of the reference's `apb_freq_hz`-
- * based tick formula (`ticks = elapsed / divider`) - a documented
- * assumption, not a fact about real hardware, since this interpreter has no
- * actual notion of CPU-clock-vs-APB-clock ratio.
+ * precomputed absolute time. This interpreter has no wall clock in that
+ * sense - instead, `advance(nanos)` is a *polled* model: a driver (see
+ * `soc/bus.ts`'s `tick()`) calls it once per `Cpu.step()` with that step's
+ * real elapsed time (`cpu/cpu.ts`'s `Cpu.lastStepNanos`, itself derived from
+ * an honestly-approximated per-opcode cycle cost - see that file's doc
+ * comment). What *is* real here: TIMG's own clock is the ESP32's actual,
+ * fixed 80MHz APB bus (`APB_FREQ_HZ` below) - a real, documented rate,
+ * independent of whatever the CPU itself is clocked at. `advance` converts
+ * incoming nanoseconds into real APB ticks (`ticks = nanos * 80MHz / 1e9`,
+ * divided by the configured `DIVIDER`/`PRESCALE` exactly as the reference's
+ * own tick formula does), tracking a nanosecond remainder across calls so
+ * repeated small `advance()` calls don't lose precision to integer
+ * division.
  *
  * `T0CONFIG`/`T1CONFIG`'s `DIVIDER` field maps to a real divider value via
  * `esp32_timg_timer_div_from_reg` exactly as in the reference: raw 0 means
@@ -113,6 +117,22 @@ const WDT_PROTECT_WORD = 0x50d83aa1;
 const U32 = 0xffffffffn;
 const U64 = (1n << 64n) - 1n;
 
+/** ESP32's real, fixed APB peripheral-bus clock - independent of CPU frequency (a documented fact, not an approximation). */
+const APB_FREQ_HZ = 80_000_000n;
+const NANOS_PER_SECOND = 1_000_000_000n;
+
+/**
+ * Converts `nanosIn` (a running remainder plus a new `advance()` delta) into
+ * whole APB ticks (scaled by `divisor` - `DIVIDER` or `PRESCALE`), returning
+ * both the tick count and the nanosecond remainder left over for the next
+ * call. Shared by `GpTimer` and the WDT's own tick accounting below.
+ */
+function apbTicksFromNanos(nanosIn: bigint, divisor: bigint): { ticks: bigint; remainder: bigint } {
+  const ticks = (nanosIn * APB_FREQ_HZ) / (NANOS_PER_SECOND * divisor);
+  const consumedNanos = (ticks * NANOS_PER_SECOND * divisor) / APB_FREQ_HZ;
+  return { ticks, remainder: nanosIn - consumedNanos };
+}
+
 /** WDTCONFIG0's per-stage STGn mode field values (Esp32TimgWdtStageMode). */
 const WDT_MODE_OFF = 0;
 const WDT_MODE_INT = 1;
@@ -140,8 +160,8 @@ class GpTimer {
   /** The ALARM config bit's "armed" state - self-clears the instant the alarm fires, see this file's doc comment. */
   private alarmArmed = false;
   private divider = 2;
-  /** Cycles left over from the last `advance()` that didn't add up to a whole tick yet. */
-  private tickRemainder = 0n;
+  /** Nanoseconds left over from the last `advance()` that didn't add up to a whole APB tick yet. */
+  private nanosRemainder = 0n;
 
   constructor() {
     this.applyConfig();
@@ -200,18 +220,17 @@ class GpTimer {
   }
 
   /**
-   * Advance the counter by `cycles` (scaled by the configured divider) and
-   * report whether the alarm fired this call. Returns false without doing
-   * anything if the timer isn't enabled - matches
+   * Advance the counter by `nanos` real elapsed nanoseconds, converted into
+   * real APB ticks scaled by the configured divider (`apbTicksFromNanos`),
+   * and report whether the alarm fired this call. Returns false without
+   * doing anything if the timer isn't enabled - matches
    * `esp32_timg_timer_direction`'s `!en -> 0` case.
    */
-  advance(cycles: bigint): boolean {
+  advance(nanos: bigint): boolean {
     if (!this.enabled) return false;
 
-    const div = BigInt(this.divider);
-    const total = this.tickRemainder + cycles;
-    const ticks = total / div;
-    this.tickRemainder = total % div;
+    const { ticks, remainder } = apbTicksFromNanos(this.nanosRemainder + nanos, BigInt(this.divider));
+    this.nanosRemainder = remainder;
     if (ticks === 0n) return false;
 
     const before = this.counter;
@@ -261,7 +280,7 @@ export class Timg {
   private wdtPrescale = 1;
   private wdtStage = 0;
   private wdtCounter = 0n;
-  private wdtTickRemainder = 0n;
+  private wdtNanosRemainder = 0n;
 
   private intEna = 0;
   private intRaw = 0;
@@ -312,16 +331,14 @@ export class Timg {
     this.setActive(source, (this.intEna & bit) !== 0);
   }
 
-  /** Advance T0/T1's counters and the WDT's stage countdown by `cycles` - see this file's doc comment. */
-  advance(cycles: bigint): void {
-    if (this.t0.advance(cycles)) this.setIntRaw(1 << 0, 'T0');
-    if (this.t1.advance(cycles)) this.setIntRaw(1 << 1, 'T1');
+  /** Advance T0/T1's counters and the WDT's stage countdown by `nanos` real elapsed nanoseconds - see this file's doc comment. */
+  advance(nanos: bigint): void {
+    if (this.t0.advance(nanos)) this.setIntRaw(1 << 0, 'T0');
+    if (this.t1.advance(nanos)) this.setIntRaw(1 << 1, 'T1');
 
     if (!this.wdtEnabled) return;
-    const prescale = BigInt(this.wdtPrescale);
-    const total = this.wdtTickRemainder + cycles;
-    const ticks = total / prescale;
-    this.wdtTickRemainder = total % prescale;
+    const { ticks, remainder } = apbTicksFromNanos(this.wdtNanosRemainder + nanos, BigInt(this.wdtPrescale));
+    this.wdtNanosRemainder = remainder;
     if (ticks === 0n) return;
 
     this.wdtCounter += ticks;

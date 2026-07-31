@@ -112,19 +112,23 @@ describe('Timg', () => {
     expect(timg.readWord(TIMG_REG.INT_ST)).toBe(0);
   });
 
+  // advance() now takes real elapsed nanoseconds (see timer.ts's doc comment): at
+  // the real 80MHz APB clock, one APB tick is 12.5ns. With DIVIDER raw=1 (real
+  // divider 2, used throughout below), one counter tick is 25ns - so N ticks is
+  // N*25 nanoseconds. The WDT tests use PRESCALE=8 (100ns/tick) for round numbers.
   describe('advance() - T0/T1 counters and alarms', () => {
     it('does not advance the counter while disabled (EN=0, the reset default)', () => {
       const timg = new Timg();
-      timg.advance(1000n);
+      timg.advance(1_000_000n);
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(0);
     });
 
-    it('advances the counter by cycles/divider once enabled', () => {
+    it('advances the counter by real APB ticks (scaled by DIVIDER) once enabled', () => {
       const timg = new Timg();
       timg.writeWord(TIMG_REG.T0CONFIG, T0_EN | T0_INCREASE | (1 << 13)); // divider raw=1 -> real divider 2
-      timg.advance(10n); // 10/2 = 5 ticks
+      timg.advance(125n); // 125ns / 25ns-per-tick = 5 ticks
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(5);
-      timg.advance(3n); // remainder 3 -> 1 more tick (2 cycles), 1 cycle carried
+      timg.advance(30n); // 30ns -> 1 more tick (25ns), 5ns carried as remainder
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(6);
     });
 
@@ -136,7 +140,7 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.T0CONFIG, T0_CONFIG_RUNNING);
       timg.writeWord(TIMG_REG.INT_ENA, 0b1); // T0
 
-      timg.advance(10n); // divider=2 -> 5 ticks, counter reaches the alarm exactly
+      timg.advance(125n); // 5 ticks, counter reaches the alarm exactly
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b1).toBe(0b1);
       expect(events).toEqual([['T0', true]]);
     });
@@ -145,7 +149,7 @@ describe('Timg', () => {
       const timg = new Timg();
       timg.writeWord(TIMG_REG.T0ALARMLO, 5);
       timg.writeWord(TIMG_REG.T0CONFIG, T0_EN | T0_INCREASE | T0_AUTORELOAD | T0_ALARM | (1 << 13));
-      timg.advance(10n);
+      timg.advance(125n);
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b1).toBe(0);
     });
 
@@ -156,18 +160,18 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.T0CONFIG, T0_CONFIG_RUNNING);
       timg.writeWord(TIMG_REG.INT_ENA, 0b1);
 
-      timg.advance(10n); // reaches alarm(5) exactly, fires once
+      timg.advance(125n); // reaches alarm(5) exactly, fires once
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(100); // reloaded from TxLOAD
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b1).toBe(0b1);
 
       timg.writeWord(TIMG_REG.INT_CLR, 0b1);
-      timg.advance(10n); // counter now well past 5 again, but ALARM never got rewritten -> no second fire
+      timg.advance(125n); // counter now well past 5 again, but ALARM never got rewritten -> no second fire
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b1).toBe(0);
 
       // Rearm: set a new alarm ahead of the counter's current position (105) and rewrite CONFIG with ALARM=1.
       timg.writeWord(TIMG_REG.T0ALARMLO, 110);
       timg.writeWord(TIMG_REG.T0CONFIG, T0_CONFIG_RUNNING);
-      timg.advance(10n); // counter 105 -> 110, crosses the new alarm
+      timg.advance(125n); // counter 105 -> 110, crosses the new alarm
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b1).toBe(0b1);
     });
 
@@ -175,14 +179,14 @@ describe('Timg', () => {
       const timg = new Timg();
       timg.writeWord(TIMG_REG.T0ALARMLO, 5);
       timg.writeWord(TIMG_REG.T0CONFIG, T0_EN | T0_INCREASE | T0_LEVEL_INT | T0_ALARM | (1 << 13));
-      timg.advance(10n); // 5 ticks
+      timg.advance(125n); // 5 ticks
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(5); // not reloaded - autoreload is off
     });
 
     it('T0 and T1 advance independently', () => {
       const timg = new Timg();
       timg.writeWord(TIMG_REG.T0CONFIG, T0_EN | T0_INCREASE | (1 << 13));
-      timg.advance(10n);
+      timg.advance(125n);
       expect(timg.readWord(TIMG_REG.T0LO)).toBe(5);
       expect(timg.readWord(TIMG_REG.T1LO)).toBe(0); // T1 never enabled
     });
@@ -191,7 +195,7 @@ describe('Timg', () => {
   describe('advance() - WDT stage timeout pipeline', () => {
     it('does nothing while the WDT is disabled (EN=0, the reset default)', () => {
       const timg = new Timg();
-      timg.advance(10_000_000n);
+      timg.advance(10_000_000_000n);
       // No observable state to check directly, but this must not throw and INT_RAW stays clear.
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b100).toBe(0);
     });
@@ -204,10 +208,10 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.WDTCONFIG2, 5); // stage 0 timeout = 5 ticks
       // EN | STG0=1 (interrupt) | LEVEL_INT
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (1 << 29) | (1 << 21));
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16); // prescale=1
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16); // prescale=8 -> 100ns/tick
       timg.writeWord(TIMG_REG.INT_ENA, 0b100);
 
-      timg.advance(5n);
+      timg.advance(500n); // 5 ticks
       expect(timg.readWord(TIMG_REG.INT_RAW) & 0b100).toBe(0b100);
       expect(events).toEqual([['WDT', true]]);
     });
@@ -219,9 +223,9 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.WDTPROTECT, 0x50d83aa1);
       timg.writeWord(TIMG_REG.WDTCONFIG2, 3);
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (2 << 29)); // EN | STG0=2 (cpu-reset)
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16);
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16);
 
-      timg.advance(3n);
+      timg.advance(300n); // 3 ticks
       expect(resetKind).toBe('cpu');
     });
 
@@ -232,9 +236,9 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.WDTPROTECT, 0x50d83aa1);
       timg.writeWord(TIMG_REG.WDTCONFIG2, 3);
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (3 << 29)); // EN | STG0=3 (system-reset)
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16);
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16);
 
-      timg.advance(3n);
+      timg.advance(300n); // 3 ticks
       expect(resetKind).toBe('system');
     });
 
@@ -247,14 +251,14 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.WDTCONFIG3, 3); // stage 1 timeout
       // EN | STG0=1 (int) | STG1=1 (int) | LEVEL_INT
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (1 << 29) | (1 << 27) | (1 << 21));
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16);
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16);
       timg.writeWord(TIMG_REG.INT_ENA, 0b100);
 
-      timg.advance(3n); // stage 0 times out, fires
+      timg.advance(300n); // stage 0 times out (3 ticks), fires
       expect(events).toEqual([['WDT', true]]);
       timg.writeWord(TIMG_REG.INT_CLR, 0b100);
 
-      timg.advance(3n); // stage 1 times out too (counter reset to 0 after stage 0)
+      timg.advance(300n); // stage 1 times out too (counter reset to 0 after stage 0)
       expect(events).toEqual([
         ['WDT', true],
         ['WDT', false],
@@ -269,13 +273,13 @@ describe('Timg', () => {
       timg.writeWord(TIMG_REG.WDTPROTECT, 0x50d83aa1);
       timg.writeWord(TIMG_REG.WDTCONFIG2, 5);
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (1 << 29) | (1 << 21));
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16);
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16);
       timg.writeWord(TIMG_REG.INT_ENA, 0b100);
 
-      timg.advance(3n); // most of the way to the stage-0 timeout
+      timg.advance(300n); // 3 of 5 ticks - most of the way to the stage-0 timeout
       timg.writeWord(TIMG_REG.WDTFEED, 1 << 31); // feed - resets the countdown
 
-      timg.advance(3n); // would have timed out at cycle 6 without the feed
+      timg.advance(300n); // would have timed out at 6 ticks without the feed
       expect(fired).toBe(false);
     });
 
@@ -283,16 +287,16 @@ describe('Timg', () => {
       const timg = new Timg();
       timg.writeWord(TIMG_REG.WDTPROTECT, 0x50d83aa1);
       timg.writeWord(TIMG_REG.WDTCONFIG2, 5);
-      timg.writeWord(TIMG_REG.WDTCONFIG1, 1 << 16);
+      timg.writeWord(TIMG_REG.WDTCONFIG1, 8 << 16);
 
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (1 << 29) | (1 << 21)); // enable
-      timg.advance(3n);
+      timg.advance(300n);
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 29) | (1 << 21)); // disable (EN cleared)
       timg.writeWord(TIMG_REG.WDTCONFIG0, (1 << 31) | (1 << 29) | (1 << 21)); // re-enable - resets counter
 
       let fired = false;
       timg.onInterruptChange = () => (fired = true);
-      timg.advance(3n); // only 3 more ticks since re-enable, not 6 - shouldn't reach the stage-0 timeout of 5
+      timg.advance(300n); // only 3 more ticks since re-enable, not 6 - shouldn't reach the stage-0 timeout of 5
       expect(fired).toBe(false);
     });
   });
