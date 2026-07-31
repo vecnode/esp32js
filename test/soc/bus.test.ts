@@ -221,6 +221,21 @@ describe('SystemBus', () => {
       cpu.step(); // set low
       expect(bus.gpio.getPin(2)).toBe(0);
     });
+
+    it('drives a real GPIO rising-edge interrupt end to end through the matrix to a real Cpu', () => {
+      const bus = new SystemBus();
+      const cpu = new Cpu(new RegisterFile(), bus, MEMORY_MAP.iram.base);
+      bus.intmatrix.attach(cpu);
+      cpu.intenable = 1 << 7; // route GPIO's source to CPU line 7 (level 1)
+      bus.write32(PERIPHERAL_BASE.dport + 0x104 + INTMATRIX_SOURCE.GPIO * 4, 7);
+
+      const PIN0_REG = 0x88; // GPIO_PINn base
+      bus.write32(PERIPHERAL_BASE.gpio + PIN0_REG + 5 * 4, (1 << 7) | (1 << 15)); // pin 5: INT_TYPE=1 (rising), pro-cpu enabled
+      bus.gpio.setPin(5, 1); // external rising edge
+
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+    });
   });
 
   describe('TIMG0 dispatch', () => {
