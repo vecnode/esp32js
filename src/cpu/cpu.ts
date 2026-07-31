@@ -174,6 +174,21 @@ const CYCLE_COST: Partial<Record<Decoded['op'], bigint>> = {
 /** Flat cost for taking an interrupt or exception vector - same approximation caveat as `CYCLE_COST`. */
 const EXCEPTION_COST = 4n;
 
+/**
+ * ESP32's real, documented maximum CPU clock (Espressif's ESP32 datasheet) -
+ * the default `Cpu` assumes if the embedder doesn't say otherwise. Unlike
+ * `CYCLE_COST`, this number itself isn't an approximation - it's what turns
+ * the approximate cycle count into an approximate but *real-unit* elapsed
+ * time (`lastStepNanos`/`elapsedNanos`), which is what peripherals with
+ * their own real, fixed clock (TIMG/UART, both driven off the 80MHz APB bus
+ * regardless of CPU frequency - see `peripherals/timer.ts`) actually need,
+ * rather than a shared, ambiguous "cycle" conflating two different clock
+ * domains.
+ */
+const DEFAULT_CPU_FREQ_HZ = 240_000_000n;
+
+const NANOS_PER_SECOND = 1_000_000_000n;
+
 export interface Bus {
   readByte(addr: number): number;
   read32(addr: number): number;
@@ -266,6 +281,13 @@ export class Cpu {
   /** The cost `step()` just added to `cycles` - what a caller forwards to `SystemBus.tick()` without recomputing it. */
   lastStepCycles = 0n;
 
+  /** This `Cpu`'s assumed clock rate - see `DEFAULT_CPU_FREQ_HZ`'s doc comment. */
+  readonly cpuFreqHz: bigint;
+  /** `cycles` converted to elapsed nanoseconds via `cpuFreqHz` - a real unit, not an ambiguous "cycle". */
+  elapsedNanos = 0n;
+  /** The nanoseconds `step()` just added to `elapsedNanos` - what a caller forwards to `SystemBus.tick()`. */
+  lastStepNanos = 0n;
+
   /**
    * SAR (shift amount register). SSR/SSAI store the amount directly (0-31);
    * SSL stores its 32's-complement instead (1-32), so SAR alone doesn't say
@@ -299,10 +321,11 @@ export class Cpu {
   /** EPS2-EPS6 (index by level) - the PsSnapshot saved on entry to a level-2..6 interrupt. */
   private readonly psByLevel = new Map<number, PsSnapshot>();
 
-  constructor(regs: RegisterFile, bus: Bus, pc = RESET_VECTOR) {
+  constructor(regs: RegisterFile, bus: Bus, pc = RESET_VECTOR, cpuFreqHz = DEFAULT_CPU_FREQ_HZ) {
     this.regs = regs;
     this.bus = bus;
     this.pc = pc >>> 0;
+    this.cpuFreqHz = cpuFreqHz;
   }
 
   /**
@@ -386,6 +409,14 @@ export class Cpu {
     return this.takeLeveledInterrupt(pc, bestLevel);
   }
 
+  /** Records a step's cycle cost in both units - `cycles` (raw instruction count) and `elapsedNanos` (real time, via `cpuFreqHz`). */
+  private accountCost(cost: bigint): void {
+    this.lastStepCycles = cost;
+    this.cycles += cost;
+    this.lastStepNanos = (cost * NANOS_PER_SECOND) / this.cpuFreqHz;
+    this.elapsedNanos += this.lastStepNanos;
+  }
+
   private fetch24(addr: number): number {
     const b0 = this.bus.readByte(addr);
     const b1 = this.bus.readByte((addr + 1) >>> 0);
@@ -440,8 +471,7 @@ export class Cpu {
     const interruptVector = this.checkInterrupts(pc);
     if (interruptVector !== null) {
       this.pc = interruptVector;
-      this.lastStepCycles = EXCEPTION_COST;
-      this.cycles += EXCEPTION_COST;
+      this.accountCost(EXCEPTION_COST);
       return;
     }
 
@@ -782,8 +812,7 @@ export class Cpu {
     }
 
     const cost = this.lastException !== null ? EXCEPTION_COST : (CYCLE_COST[inst.op] ?? 1n);
-    this.lastStepCycles = cost;
-    this.cycles += cost;
+    this.accountCost(cost);
     this.pc = nextPc;
   }
 }

@@ -665,3 +665,17 @@ Not implemented: anything camera- or microSD-specific for ESP32-CAM -
 are ordinary digital I/O with `role: 'camera'`/`'sd-card'` metadata only,
 consistent with this project's already-established I2S-stub scope limit
 (see "What's real silicon vs. what QEMU itself stubs out" above).
+
+`Cpu` now bridges its approximate cycle count to real elapsed time.
+`cpuFreqHz` (constructor parameter, default `240_000_000` - ESP32's real,
+documented maximum CPU clock, not an approximation) converts each step's
+`CYCLE_COST` into `lastStepNanos`/`elapsedNanos`. This matters because
+`Timg`/`Uart0` are driven off a *different*, fixed real clock (the 80MHz
+APB bus) regardless of what the CPU is clocked at - treating "cycles" as
+if they were already APB ticks (the assumption both files' doc comments
+flagged when first written) conflated two real, distinct clock domains
+into one ambiguous unit. Real elapsed nanoseconds is the correct
+intermediate value: CPU-cycle-approximate but expressed in a unit every
+peripheral can convert into its own real, documented clock rate. This is
+the foundation for real UART baud pacing (below) and more accurate TIMG
+timing - see each file's own updated doc comment for the conversion math.

@@ -158,6 +158,30 @@ describe('Cpu fetch/execute', () => {
     expect(cpu.lastStepCycles).toBe(2n);
   });
 
+  it('converts each step\'s cycle cost into real elapsed nanoseconds via cpuFreqHz (default 240MHz)', () => {
+    const { cpu, bus } = makeCpu();
+    bus.writeInsn(0, MOVI(2, 5)); // cost 1n
+    bus.writeInsn(3, L32I(3, 2, 0)); // cost 2n
+
+    cpu.step();
+    expect(cpu.lastStepNanos).toBe((1n * 1_000_000_000n) / 240_000_000n);
+    expect(cpu.elapsedNanos).toBe(cpu.lastStepNanos);
+
+    cpu.step();
+    const stepTwoNanos = (2n * 1_000_000_000n) / 240_000_000n;
+    expect(cpu.lastStepNanos).toBe(stepTwoNanos);
+    expect(cpu.elapsedNanos).toBe((1n * 1_000_000_000n) / 240_000_000n + stepTwoNanos);
+  });
+
+  it('honors a custom cpuFreqHz (e.g. ESP32 booting at its slower 80MHz default before app code scales it up)', () => {
+    const bus = new TestBus();
+    const cpu = new Cpu(new RegisterFile(), bus, 0, 80_000_000n);
+    bus.writeInsn(0, MOVI(2, 5)); // cost 1n
+
+    cpu.step();
+    expect(cpu.lastStepNanos).toBe((1n * 1_000_000_000n) / 80_000_000n);
+  });
+
   it('charges the flat exception-vector cost, not the opcode cost, when an instruction faults', () => {
     const { cpu, bus } = makeCpu();
     bus.writeInsn(0, QUOU(2, 3, 4)); // divisor (a4) is 0 -> divide-by-zero, QUOU's own cost (4n) is not what's charged
