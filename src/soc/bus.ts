@@ -1,6 +1,7 @@
 /**
  * A real, byte-backed memory bus over the SoC address map in `memmap.ts`,
- * with UART0, GPIO, and TIMG0 wired up as live peripherals.
+ * with UART0, GPIO, TIMG0, and the interrupt matrix wired up as live
+ * peripherals.
  *
  * This is the first thing in the project backed by actual bytes rather than
  * a test double: `cpu/cpu.ts`'s `Bus` interface can now be satisfied by
@@ -22,6 +23,11 @@
  * effects up to three extra times with stale intermediate values - worth
  * being explicit about rather than silently correct only by accident.
  *
+ * The interrupt matrix (`peripherals/intmatrix.ts`) needs a `Cpu` reference
+ * to drive interrupt lines, which `SystemBus` doesn't otherwise depend on
+ * (a `Cpu` holds a `Bus`, not the other way around) - call
+ * `bus.intmatrix.attach(cpu)` once after constructing both.
+ *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
  *   - Every other peripheral block in `PERIPHERAL_BASE` besides
  *     UART0/GPIO/TIMG0 isn't backed at all - accessing them behaves like any
@@ -39,9 +45,13 @@
 
 import type { Bus } from '../cpu/cpu.js';
 import { Gpio, GPIO_WINDOW_SIZE } from '../peripherals/gpio.js';
+import { IntMatrix, INTMATRIX_WINDOW_SIZE } from '../peripherals/intmatrix.js';
 import { Timg, TIMG_WINDOW_SIZE } from '../peripherals/timer.js';
 import { Uart0, UART_WINDOW_SIZE } from '../peripherals/uart.js';
 import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE, regionAt } from './memmap.js';
+
+/** A_DPORT_PRO_MAC_INTR_MAP - the interrupt matrix's map registers really do live inside DPORT's own address window. */
+const DPORT_INTMATRIX_OFFSET = 0x104;
 
 interface PeripheralDevice {
   readWord(offset: number): number;
@@ -60,6 +70,7 @@ export class SystemBus implements Bus {
   readonly uart0 = new Uart0();
   readonly gpio = new Gpio();
   readonly timg0 = new Timg();
+  readonly intmatrix = new IntMatrix();
 
   constructor() {
     const regions = {} as Record<MemoryRegionName, Uint8Array>;
@@ -71,6 +82,7 @@ export class SystemBus implements Bus {
       { base: PERIPHERAL_BASE.uart0, size: UART_WINDOW_SIZE, device: this.uart0 },
       { base: PERIPHERAL_BASE.gpio, size: GPIO_WINDOW_SIZE, device: this.gpio },
       { base: PERIPHERAL_BASE.timg0, size: TIMG_WINDOW_SIZE, device: this.timg0 },
+      { base: PERIPHERAL_BASE.dport + DPORT_INTMATRIX_OFFSET, size: INTMATRIX_WINDOW_SIZE, device: this.intmatrix },
     ];
   }
 
