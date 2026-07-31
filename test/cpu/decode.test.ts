@@ -413,9 +413,11 @@ describe('decode', () => {
       expect(decode(word)).toEqual({ op: 'RFI', level: 5 });
     });
 
-    it('does not confuse RFI (t=1) with RFWO/RFWU (t=0)', () => {
+    it('does not confuse RFI (t=1) with RFE/RFWO/RFWU (t=0)', () => {
+      const rfe = rrr(0x0, 0x0, 3, 0, 0);
       const rfwo = rrr(0x0, 0x0, 3, 4, 0);
       const rfwu = rrr(0x0, 0x0, 3, 5, 0);
+      expect(decode(rfe)).toEqual({ op: 'RFE' });
       expect(decode(rfwo)).toEqual({ op: 'RFWO' });
       expect(decode(rfwu)).toEqual({ op: 'RFWU' });
     });

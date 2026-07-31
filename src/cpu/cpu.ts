@@ -153,13 +153,21 @@ const VEC_WINDOW_OVERFLOW: Record<4 | 8 | 12, number> = { 4: 0x000, 8: 0x080, 12
 const VEC_WINDOW_UNDERFLOW: Record<4 | 8 | 12, number> = { 4: 0x040, 8: 0x0c0, 12: 0x140 };
 const VEC_KERNEL = 0x300; // XCHAL_KERNEL_VECOFS - general exceptions, PS.UM=0 assumed
 const VEC_DOUBLE = 0x3c0; // XCHAL_DOUBLEEXC_VECOFS
-/** XCHAL_INTLEVELn_VECOFS for n=2..6 (index 0/1/7 unused - level 1 shares VEC_KERNEL, level 7 is NMI and unsupported). */
-const VEC_INTLEVEL: Record<number, number> = { 2: 0x180, 3: 0x1c0, 4: 0x200, 5: 0x240, 6: 0x280 };
+/**
+ * XCHAL_INTLEVELn_VECOFS for n=2..7 (index 0/1 unused - level 1 shares
+ * VEC_KERNEL). Level 7 is NMI (XCHAL_NMI_VECOFS == XCHAL_INTLEVEL7_VECOFS)
+ * and reuses the same saved-PC/PS-by-level machinery as levels 2-6, with
+ * one difference: it's unmaskable (see `checkInterrupts`).
+ */
+const VEC_INTLEVEL: Record<number, number> = { 2: 0x180, 3: 0x1c0, 4: 0x200, 5: 0x240, 6: 0x280, 7: 0x2c0 };
 
 /** ESP32's real, hardware-fixed level assignment for each of the 32 CPU interrupt lines (XCHAL_INTn_LEVEL, core-isa.h). */
 const LINE_LEVEL: readonly number[] = [
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 7, 3, 5, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 3, 4, 3, 4, 5,
 ];
+
+/** The one CPU line ESP32 wires to NMI (XCHAL_INT14_TYPE == NMI, core-isa.h) - unmaskable, bypasses INTENABLE and cintlevel entirely. */
+const NMI_LINE = 14;
 
 /** EXCM_LEVEL: while PS.EXCM is set, the effective interrupt level is at least this (xtensa_get_cintlevel). */
 const EXCM_LEVEL = 3;
@@ -280,12 +288,29 @@ export class Cpu {
     this.pendingCallinc = snapshot.callinc;
   }
 
+  /** Levels 2-6 (and 7/NMI) share this: save PC/PS, set PS.INTLEVEL/EXCM, jump to that level's vector. */
+  private takeLeveledInterrupt(pc: number, level: number): number {
+    this.epcByLevel.set(level, pc >>> 0);
+    this.psByLevel.set(level, this.snapshotPs());
+    this.intlevel = level;
+    this.excm = true;
+    this.lastException = { kind: 'interrupt', level };
+    return (this.vecbase + VEC_INTLEVEL[level]!) >>> 0;
+  }
+
   /**
    * HELPER(handle_interrupt): finds the highest-level active&enabled line
    * that exceeds the current interrupt level and takes it, returning the
    * vector address to jump to - or null if nothing is currently takeable.
+   * NMI (`NMI_LINE`) is checked first and bypasses both INTENABLE and the
+   * cintlevel gate entirely - real hardware's `handle_interrupt` ORs
+   * `level == nmi_level` into the takeable condition unconditionally.
    */
   private checkInterrupts(pc: number): number | null {
+    if (this.interruptLines & (1 << NMI_LINE)) {
+      return this.takeLeveledInterrupt(pc, 7);
+    }
+
     const active = this.interruptLines & this.intenable;
     if (active === 0) return null;
     const cintlevel = this.currentInterruptLevel();
@@ -301,12 +326,7 @@ export class Cpu {
     if (bestLevel === 1) {
       return this.raiseGeneralException(pc, { kind: 'interrupt', level: 1 });
     }
-    this.epcByLevel.set(bestLevel, pc >>> 0);
-    this.psByLevel.set(bestLevel, this.snapshotPs());
-    this.intlevel = bestLevel;
-    this.excm = true;
-    this.lastException = { kind: 'interrupt', level: bestLevel };
-    return (this.vecbase + VEC_INTLEVEL[bestLevel]!) >>> 0;
+    return this.takeLeveledInterrupt(pc, bestLevel);
   }
 
   private fetch24(addr: number): number {
@@ -592,7 +612,7 @@ export class Cpu {
         const saved = this.psByLevel.get(inst.level);
         const savedPc = this.epcByLevel.get(inst.level);
         if (saved === undefined || savedPc === undefined) {
-          // No matching level-2..6 interrupt entry to return from - real
+          // No matching level-2..7 interrupt entry to return from - real
           // hardware behavior for a bogus level here isn't modeled; treat
           // as illegal rather than silently jumping somewhere wrong.
           nextPc = this.raiseIllegal(pc);
@@ -602,6 +622,13 @@ export class Cpu {
         nextPc = savedPc >>> 0;
         break;
       }
+      case 'RFE':
+        // translate_rfe: PS.EXCM cleared, jump to EPC1 - returns from a
+        // level-1 exception/interrupt/illegal-instruction/divide-by-zero,
+        // all of which share that one save slot.
+        this.excm = false;
+        nextPc = this.epc1 >>> 0;
+        break;
       case 'RSR':
         if (inst.sr === SR_PS) this.regs.set(inst.reg, this.packPs());
         else if (inst.sr === SR_INTENABLE) this.regs.set(inst.reg, this.intenable >>> 0);

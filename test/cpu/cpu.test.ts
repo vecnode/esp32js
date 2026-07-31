@@ -86,6 +86,7 @@ const RFWO = 0x003400;
 const RFWU = 0x003500;
 const RSIL = (dest: number, level: number) => (0x6 << 12) | ((level & 0xf) << 8) | (dest << 4);
 const RFI = (level: number) => (0x3 << 12) | ((level & 0xf) << 8) | (1 << 4);
+const RFE = 0x003000; // op0=0,op1=0,op2=0,r=3,s=0,t=0
 const RSR = (sr: number, reg: number) => (0x3 << 16) | (((sr >> 4) & 0xf) << 12) | ((sr & 0xf) << 8) | (reg << 4);
 const WSR = (sr: number, reg: number) => (0x1 << 20) | (0x3 << 16) | (((sr >> 4) & 0xf) << 12) | ((sr & 0xf) << 8) | (reg << 4);
 const SR_PS = 230;
@@ -871,6 +872,67 @@ describe('Cpu fetch/execute', () => {
       bus.writeInsn(0, RSR(1, 2)); // SR=1 is neither PS(230) nor INTENABLE(228)
       cpu.step();
       expect(cpu.lastException).toEqual({ kind: 'illegal' });
+    });
+
+    it('RFE returns from a level-1 illegal-instruction exception (clears EXCM, jumps to EPC1)', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400;
+      bus.writeInsn(0, 0xdead0f); // illegal
+      bus.writeInsn(cpu.vecbase + 0x300, RFE);
+
+      cpu.step(); // illegal instruction -> vectors
+      expect(cpu.lastException).toEqual({ kind: 'illegal' });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x300);
+      expect(cpu.excm).toBe(true);
+
+      // The handler "fixes" the fault before returning, e.g. by patching in
+      // a real instruction - otherwise RFE would just re-trap on retry.
+      bus.writeInsn(0, MOVI(1, 42));
+
+      cpu.step(); // RFE
+      expect(cpu.pc).toBe(0); // back to EPC1
+      expect(cpu.excm).toBe(false);
+
+      cpu.step(); // the patched-in instruction now runs for real
+      expect(cpu.regs.get(1)).toBe(42);
+    });
+
+    it('RFE returns from a level-1 interrupt the same way', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400;
+      bus.writeInsn(cpu.vecbase + 0x300, RFE);
+      cpu.intenable = 1 << 0; // line 0 is level 1
+      cpu.setInterruptLine(0, true);
+
+      cpu.step(); // interrupt taken
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x300);
+
+      cpu.setInterruptLine(0, false); // "ISR" clears the condition
+      cpu.step(); // RFE
+      expect(cpu.pc).toBe(0); // back to the original, preempted pc
+      expect(cpu.excm).toBe(false);
+    });
+
+    it('an NMI (line 14) is unmaskable - taken even with INTENABLE=0 and PS.EXCM set', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400;
+      bus.writeInsn(0, MOVI(1, 5)); // preempted
+      bus.writeInsn(cpu.vecbase + 0x2c0, RFI(7));
+      cpu.excm = true; // would block every other interrupt level
+
+      cpu.setInterruptLine(14, true); // intenable left at 0 - doesn't matter for NMI
+
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 7 });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x2c0);
+      expect(cpu.intlevel).toBe(7);
+      expect(cpu.regs.get(1)).toBe(0); // MOVI never ran
+
+      cpu.setInterruptLine(14, false);
+      cpu.step(); // RFI 7
+      expect(cpu.pc).toBe(0);
+      expect(cpu.excm).toBe(true); // restored to what it was before the NMI (true)
     });
   });
 });

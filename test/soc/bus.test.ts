@@ -9,6 +9,8 @@ import { TIMG_REG } from '../../src/peripherals/timer.js';
 import { INTMATRIX_SOURCE } from '../../src/peripherals/intmatrix.js';
 import { RESET_CAUSE, RTC_CNTL_REG } from '../../src/soc/rtc_cntl.js';
 import { DPORT_REG } from '../../src/soc/dport.js';
+import { IoMux } from '../../src/peripherals/iomux.js';
+import { ADC_REG } from '../../src/peripherals/adc.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -353,6 +355,38 @@ describe('SystemBus', () => {
       cpu.step();
       expect(resetFired).toBe('procpu');
       expect(bus.rtcCntl.readWord(RTC_CNTL_REG.RESET_STATE) & 0x3f).toBe(RESET_CAUSE.SW_CPU_RESET);
+    });
+  });
+
+  describe('IO_MUX dispatch', () => {
+    it('routes a 32-bit write/read to pin 2\'s MUX register', () => {
+      const bus = new SystemBus();
+      const addr = PERIPHERAL_BASE.ioMux + IoMux.offsetForPin(2)!;
+      bus.write32(addr, 0x123);
+      expect(bus.read32(addr)).toBe(0x123);
+    });
+
+    it('resets pin registers to 0x800, and does not collide with DPORT', () => {
+      const bus = new SystemBus();
+      const addr = PERIPHERAL_BASE.ioMux + IoMux.offsetForPin(0)!;
+      expect(bus.read32(addr)).toBe(0x800);
+      bus.write32(addr, 0xffffffff);
+      expect(bus.read32(PERIPHERAL_BASE.dport + DPORT_REG.APPCPU_BOOT_ADDR)).toBe(0);
+    });
+  });
+
+  describe('SENS (ADC) dispatch', () => {
+    it('routes a 32-bit write/read to MEAS1_START_SAR and reflects an injected channel value', () => {
+      const bus = new SystemBus();
+      bus.adc.setChannelValue(4, 777);
+      const addr = PERIPHERAL_BASE.sens + ADC_REG.MEAS1_START_SAR;
+      bus.write32(addr, 1 << (19 + 4)); // select channel 4
+      expect(bus.read32(addr)).toBe(0x10000 + 777);
+    });
+
+    it('reads the done bit plus channel 0 value (0) at reset', () => {
+      const bus = new SystemBus();
+      expect(bus.read32(PERIPHERAL_BASE.sens + ADC_REG.MEAS2_START_SAR)).toBe(0x10000);
     });
   });
 });

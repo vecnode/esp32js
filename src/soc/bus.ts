@@ -1,7 +1,7 @@
 /**
  * A real, byte-backed memory bus over the SoC address map in `memmap.ts`,
- * with UART0, GPIO, TIMG0, the interrupt matrix, RTC_CNTL, and DPORT wired
- * up as live peripherals.
+ * with UART0, GPIO, TIMG0, the interrupt matrix, RTC_CNTL, DPORT, IO_MUX,
+ * and the SAR ADC (SENS) wired up as live peripherals.
  *
  * This is the first thing in the project backed by actual bytes rather than
  * a test double: `cpu/cpu.ts`'s `Bus` interface can now be satisfied by
@@ -30,8 +30,8 @@
  *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
  *   - Every other peripheral block in `PERIPHERAL_BASE` besides
- *     UART0/GPIO/TIMG0/RTC_CNTL/DPORT isn't backed at all - accessing them
- *     behaves like any other unmapped address.
+ *     UART0/GPIO/TIMG0/RTC_CNTL/DPORT/IO_MUX/SENS isn't backed at all -
+ *     accessing them behaves like any other unmapped address.
  *   - No read-only enforcement on DROM/IROM (real flash-backed regions) -
  *     nothing stops a write from landing in "ROM" here.
  *   - Unmapped access doesn't raise LOAD_STORE_ERROR_CAUSE - it silently
@@ -44,8 +44,10 @@
  */
 
 import type { Bus } from '../cpu/cpu.js';
+import { Adc, ADC_WINDOW_SIZE } from '../peripherals/adc.js';
 import { Gpio, GPIO_WINDOW_SIZE } from '../peripherals/gpio.js';
 import { IntMatrix, INTMATRIX_WINDOW_SIZE } from '../peripherals/intmatrix.js';
+import { IoMux, IOMUX_WINDOW_SIZE } from '../peripherals/iomux.js';
 import { Timg, TIMG_WINDOW_SIZE } from '../peripherals/timer.js';
 import { Uart0, UART_WINDOW_SIZE } from '../peripherals/uart.js';
 import { Dport, DPORT_WINDOW_SIZE } from './dport.js';
@@ -75,6 +77,8 @@ export class SystemBus implements Bus {
   readonly intmatrix = new IntMatrix();
   readonly rtcCntl = new RtcCntl();
   readonly dport = new Dport();
+  readonly ioMux = new IoMux();
+  readonly adc = new Adc();
 
   constructor() {
     const regions = {} as Record<MemoryRegionName, Uint8Array>;
@@ -89,6 +93,8 @@ export class SystemBus implements Bus {
       { base: PERIPHERAL_BASE.dport + DPORT_INTMATRIX_OFFSET, size: INTMATRIX_WINDOW_SIZE, device: this.intmatrix },
       { base: PERIPHERAL_BASE.rtcCntl, size: RTC_CNTL_WINDOW_SIZE, device: this.rtcCntl },
       { base: PERIPHERAL_BASE.dport, size: DPORT_WINDOW_SIZE, device: this.dport },
+      { base: PERIPHERAL_BASE.ioMux, size: IOMUX_WINDOW_SIZE, device: this.ioMux },
+      { base: PERIPHERAL_BASE.sens, size: ADC_WINDOW_SIZE, device: this.adc },
     ];
   }
 

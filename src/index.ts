@@ -12,5 +12,7 @@ export { Timg, TIMG_REG, TIMG_WINDOW_SIZE } from './peripherals/timer.js';
 export { IntMatrix, INTMATRIX_NUM_SOURCES, INTMATRIX_WINDOW_SIZE, INTMATRIX_SOURCE } from './peripherals/intmatrix.js';
 export { RtcCntl, RTC_CNTL_REG, RTC_CNTL_WINDOW_SIZE, RESET_CAUSE } from './soc/rtc_cntl.js';
 export { Dport, DPORT_REG, DPORT_WINDOW_SIZE } from './soc/dport.js';
+export { IoMux, IOMUX_WINDOW_SIZE } from './peripherals/iomux.js';
+export { Adc, ADC_REG, ADC_WINDOW_SIZE } from './peripherals/adc.js';
 export { ESP32_CAM, ESP32_DEVKIT_C_V4, ESP32_DEVKIT_V1 } from './boards/index.js';
 export type { BoardDefinition, PinAssignment, PinRole } from './boards/index.js';
