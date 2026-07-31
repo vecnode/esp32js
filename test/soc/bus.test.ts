@@ -11,6 +11,7 @@ import { RESET_CAUSE, RTC_CNTL_REG } from '../../src/soc/rtc_cntl.js';
 import { DPORT_REG } from '../../src/soc/dport.js';
 import { IoMux } from '../../src/peripherals/iomux.js';
 import { ADC_REG } from '../../src/peripherals/adc.js';
+import { loadElf } from '../../src/loader/elf.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -387,6 +388,68 @@ describe('SystemBus', () => {
     it('reads the done bit plus channel 0 value (0) at reset', () => {
       const bus = new SystemBus();
       expect(bus.read32(PERIPHERAL_BASE.sens + ADC_REG.MEAS2_START_SAR)).toBe(0x10000);
+    });
+  });
+
+  describe('loading and running a real ELF image', () => {
+    it('loads an ELF built like a real ESP-IDF binary (IRAM .text + DRAM .bss) and runs it via Cpu.step', () => {
+      // MOVI a2,5; MOVI a3,7; ADD a4,a2,a3 - packed 3 bytes apart, real IRAM base as vaddr.
+      const MOVI = (dest: number, imm: number) => {
+        const raw12 = imm & 0xfff;
+        const s = (raw12 >> 8) & 0xf;
+        const imm8 = raw12 & 0xff;
+        return (imm8 << 16) | (0xa << 12) | (s << 8) | (dest << 4) | 0x2;
+      };
+      const ADD = (dest: number, s1: number, s2: number) => (0x8 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
+      const words = [MOVI(2, 5), MOVI(3, 7), ADD(4, 2, 3)];
+      const text = new Uint8Array(9);
+      words.forEach((word, i) => {
+        text[i * 3] = word & 0xff;
+        text[i * 3 + 1] = (word >>> 8) & 0xff;
+        text[i * 3 + 2] = (word >>> 16) & 0xff;
+      });
+
+      const EHDR_SIZE = 52;
+      const PHDR_SIZE = 32;
+      const textVaddr = MEMORY_MAP.iram.base;
+      const bssVaddr = MEMORY_MAP.dram.base;
+      const textOffset = EHDR_SIZE + 2 * PHDR_SIZE;
+      const elf = new Uint8Array(textOffset + text.length);
+      const view = new DataView(elf.buffer);
+      elf.set([0x7f, 0x45, 0x4c, 0x46], 0);
+      elf[4] = 1; // ELFCLASS32
+      elf[5] = 1; // ELFDATA2LSB
+      view.setUint32(24, textVaddr, true); // e_entry
+      view.setUint32(28, EHDR_SIZE, true); // e_phoff
+      view.setUint16(42, PHDR_SIZE, true); // e_phentsize
+      view.setUint16(44, 2, true); // e_phnum
+      // Segment 0: .text, PT_LOAD, filesz=memsz.
+      view.setUint32(EHDR_SIZE + 0, 1, true); // p_type=PT_LOAD
+      view.setUint32(EHDR_SIZE + 4, textOffset, true); // p_offset
+      view.setUint32(EHDR_SIZE + 8, textVaddr, true); // p_vaddr
+      view.setUint32(EHDR_SIZE + 16, text.length, true); // p_filesz
+      view.setUint32(EHDR_SIZE + 20, text.length, true); // p_memsz
+      elf.set(text, textOffset);
+      // Segment 1: .bss, PT_LOAD, filesz=0 < memsz=4 (uninitialized statics, zero-filled).
+      view.setUint32(EHDR_SIZE + PHDR_SIZE + 0, 1, true); // p_type=PT_LOAD
+      view.setUint32(EHDR_SIZE + PHDR_SIZE + 4, textOffset + text.length, true); // p_offset
+      view.setUint32(EHDR_SIZE + PHDR_SIZE + 8, bssVaddr, true); // p_vaddr
+      view.setUint32(EHDR_SIZE + PHDR_SIZE + 16, 0, true); // p_filesz
+      view.setUint32(EHDR_SIZE + PHDR_SIZE + 20, 4, true); // p_memsz
+
+      const bus = new SystemBus();
+      // Pre-dirty DRAM so the BSS zero-fill is actually exercised, not just incidentally already zero.
+      bus.write32(bssVaddr, 0xffffffff);
+
+      const image = loadElf(bus, elf);
+      expect(image.entry).toBe(textVaddr);
+      expect(bus.read32(bssVaddr)).toBe(0);
+
+      const cpu = new Cpu(new RegisterFile(), bus, image.entry);
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(4)).toBe(12);
     });
   });
 });
