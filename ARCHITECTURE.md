@@ -518,3 +518,28 @@ registers, which the reference itself doesn't back either.
 
 Every other peripheral in `PERIPHERAL_BASE` besides UART0/GPIO/TIMG0/
 RTC_CNTL/DPORT/interrupt-matrix/IO_MUX/SENS remains fully open.
+
+Phase 5 (started): a timing model and peripheral self-driven interrupts -
+the gap between "the CPU runs real firmware" and "this is embeddable the
+way `avr8js` is embedded in Wokwi." `cpu/cpu.ts`'s `Cpu` now carries
+`cycles: bigint` (matching `Timg`'s own 64-bit-counter style) plus a
+per-opcode `CYCLE_COST` table and a flat `EXCEPTION_COST` for any step that
+takes an interrupt or exception vector, exposed per-step as
+`lastStepCycles` so a caller can forward exactly that delta onward without
+recomputing it. This is explicitly **not** claimed to be sourced from the
+QEMU fork or real silicon timing - unlike AVR (where avr8js's cycle counts
+come straight from Atmel's published datasheet), Xtensa has no equally
+simple public per-opcode cycle table, and this repo's own QEMU source
+doesn't model per-instruction guest timing either (TCG isn't cycle-accurate
+without `icount`, which this fork doesn't use). The costs are plausible
+relative weights only (memory access and divide/FPU ops cost more than a
+register-register ALU op) - enough to give TIMG/UART a monotonic clock to
+advance against, not a timing-accuracy claim.
+
+Still open for Phase 5: a `SystemBus.tick(cycles)` path forwarding to
+peripherals that implement an `advance(cycles)` method; TIMG's counters and
+WDT actually advancing/timing out against it; GPIO edge/level interrupt
+generation; UART RX injection, interrupt generation, and TX pacing; and a
+`Board` runtime (`src/boards/`) tying `Cpu`+`SystemBus`+a `BoardDefinition`
+together with firmware loading and pin/serial passthroughs for ESP32 DevKit
+V1, DevKit C V4, and ESP32-CAM.

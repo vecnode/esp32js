@@ -139,6 +139,49 @@ describe('Cpu fetch/execute', () => {
     expect(RESET_VECTOR).toBe(0x40000400);
   });
 
+  it('accumulates approximated cycles per step, weighted by opcode (see CYCLE_COST)', () => {
+    const { cpu, bus } = makeCpu();
+    bus.writeInsn(0, MOVI(2, 0x100)); // default cost: 1 - a2 = a data address well past this code
+    bus.writeInsn(3, S32I(2, 2, 0)); // memory access: 2 - mem[0x100] = 0x100
+    bus.writeInsn(6, L32I(3, 2, 0)); // memory access: 2 - a3 = mem[0x100]
+
+    cpu.step();
+    expect(cpu.cycles).toBe(1n);
+    expect(cpu.lastStepCycles).toBe(1n);
+
+    cpu.step();
+    expect(cpu.cycles).toBe(3n);
+    expect(cpu.lastStepCycles).toBe(2n);
+
+    cpu.step();
+    expect(cpu.cycles).toBe(5n);
+    expect(cpu.lastStepCycles).toBe(2n);
+  });
+
+  it('charges the flat exception-vector cost, not the opcode cost, when an instruction faults', () => {
+    const { cpu, bus } = makeCpu();
+    bus.writeInsn(0, QUOU(2, 3, 4)); // divisor (a4) is 0 -> divide-by-zero, QUOU's own cost (4n) is not what's charged
+    cpu.regs.set(3, 10);
+    cpu.regs.set(4, 0);
+
+    cpu.step();
+    expect(cpu.lastException).toEqual({ kind: 'divide-by-zero' });
+    expect(cpu.lastStepCycles).toBe(4n); // EXCEPTION_COST
+    expect(cpu.cycles).toBe(4n);
+  });
+
+  it('charges the flat exception-vector cost when an interrupt is taken (no instruction executes)', () => {
+    const { cpu } = makeCpu();
+    cpu.vecbase = 0x400; // keep vectors within TestBus's small backing array
+    cpu.intenable = 1 << 0;
+    cpu.setInterruptLine(0, true); // line 0 is level 1
+
+    cpu.step();
+    expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+    expect(cpu.lastStepCycles).toBe(4n);
+    expect(cpu.cycles).toBe(4n);
+  });
+
   it('runs MOVI + ADD and advances pc by 3 bytes per instruction', () => {
     const { cpu, bus } = makeCpu();
     bus.writeInsn(0, MOVI(2, 5));
