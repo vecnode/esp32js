@@ -118,7 +118,68 @@ Correctness claims are only as good as what they're checked against. Plan:
 
 ## Status
 
-Phase 1 (this change): SoC memory map (`soc/memmap.ts`) and the three board
-definitions (`boards/`), both pure data validated against the addresses
-above. CPU decode/execute and peripheral behavior are separate, larger
-follow-on phases per the reference table.
+Phase 1: SoC memory map (`soc/memmap.ts`) and the three board definitions
+(`boards/`), both pure data validated against the addresses above.
+
+Phase 2 (in progress): `cpu/decode.ts` + `cpu/cpu.ts` implement a narrow
+(24-bit-only) fetch/execute loop covering ADD, SUB, MOVI, L32I, S32I, L32R,
+L32E, S32E, J, BEQ/BNE/BLT/BGE, CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO,
+RFWU - enough to run hand-assembled control flow including a full windowed
+call/return sequence that exercises `cpu/registers.ts`'s
+rotate/markFrameLive/isFrameLive mechanics end to end (previously
+untested). Bit layouts, PC-relocation formulas, and exception-vectoring
+semantics were pulled from this repo's own pre-rewrite QEMU source
+(`target/xtensa/core-esp32/xtensa-modules.inc.c` and
+`core-esp32/core-isa.h` field/vector-offset tables; `target/xtensa/
+translate.c`, `win_helper.c`, and `exc_helper.c` semantics; all still
+recoverable from git history at `cae84de99b^`), not reconstructed from
+general documentation.
+
+A minimal exception model now exists directly on `Cpu`: PS.EXCM, PS.OWB,
+EPC1, and a configurable VECBASE (defaulting to its hardware reset value,
+`0x40000000`). Illegal instructions, double exceptions, and window
+over/underflow all vector to their real, correctly-offset targets exactly
+as `HELPER(exception_cause)`/`HELPER(window_check)`/
+`HELPER(test_underflow_retw)` do; `Cpu.step()` never throws or halts for
+these - it vectors and keeps going, exposing what happened (if anything)
+via `Cpu.lastException`, matching how real silicon has no "stuck" state.
+`cpu.test.ts` proves this end to end: a crafted window overflow and a
+crafted window underflow each vector to their size-appropriate handler
+slot, and a synthetic RFWO/RFWU handler (explicitly *not* a claimed replica
+of the real ROM spill routine - that exact register layout is an ABI/
+firmware convention with no reference in this QEMU fork's source) restores
+state and successfully retries the faulting instruction.
+
+Not modeled: PS.CALLINC is a single `pendingCallinc` field rather than part
+of a full PS register; PS.INTLEVEL and interrupts generally aren't
+implemented (only the exception side); EXCCAUSE only ever needs to
+represent "illegal instruction" so it isn't a modeled register, just an
+`ExceptionCause` tag; VECBASE has no WSR/RSR instruction wired to it yet
+(tests set it directly). A real PS register, interrupt levels, and the rest
+of `translate.c`'s opcode set (plus `cpu/fpu.ts`) remain open for Phase 2;
+`cpu/exceptions.ts` as a separate module may or may not end up warranted
+once PS/EPC1 grow further - right now that state lives directly on `Cpu`
+since it's small.
+
+Phase 3 (started): `soc/bus.ts`'s `SystemBus` is the first thing in the
+project backed by real bytes rather than a test double - one `Uint8Array`
+per region in `MEMORY_MAP`, satisfying `cpu/cpu.ts`'s `Bus` interface
+directly. `test/soc/bus.test.ts` proves the CPU can fetch and execute a
+hand-assembled program placed at IRAM's real base address, not just against
+`cpu.test.ts`'s flat scratch array - the first time Phase 1's memory map and
+Phase 2's CPU have been exercised together.
+
+Explicitly out of scope for `SystemBus` right now, and flagged rather than
+half-built: peripheral register blocks (`PERIPHERAL_BASE`) aren't backed at
+all (that's Phase 4); DROM/IROM have no read-only enforcement; unmapped
+access reads as 0 / silently no-ops on write instead of raising
+LOAD_STORE_ERROR_CAUSE, because doing that properly needs an
+EXCVADDR-carrying fault channel from `Bus` back to `Cpu` (analogous to
+`HELPER(exception_cause_vaddr)` in `exc_helper.c`) that doesn't exist yet.
+
+Still open for Phase 3: actually loading a firmware image (`SystemBus`
+exposes `loadBytes()` for this, but nothing produces the bytes yet - no ELF
+parsing or ESP32 image-header handling) and the boot sequence itself
+(`soc/rtc_cntl.ts` for reset, `soc/dport.ts` for CPU/cache config) to get
+from power-on to a loaded image's entry point. Phase 4 (peripherals) is
+still fully open.
