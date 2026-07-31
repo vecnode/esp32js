@@ -287,4 +287,83 @@ describe('decode', () => {
       expect(decode(word).op).toBe('ILLEGAL');
     });
   });
+
+  describe('logical and shift instructions', () => {
+    it.each([
+      ['AND', 0x1],
+      ['OR', 0x2],
+      ['XOR', 0x3],
+    ] as const)('decodes %s (RRR, op2=0x%s)', (name, op2) => {
+      const word = rrr(op2, 0x0, 4, 2, 3);
+      expect(decode(word)).toEqual({ op: name, dest: 4, src1: 2, src2: 3 });
+    });
+
+    it('decodes NEG (op2=6, s=0)', () => {
+      const word = rrr(0x6, 0x0, 5, 0, 7);
+      expect(decode(word)).toEqual({ op: 'NEG', dest: 5, src: 7 });
+    });
+
+    it('decodes ABS (op2=6, s=1) - same shape as NEG, distinguished only by s', () => {
+      const word = rrr(0x6, 0x0, 5, 1, 7);
+      expect(decode(word)).toEqual({ op: 'ABS', dest: 5, src: 7 });
+    });
+
+    it('decodes SSR (op1=0,op2=4,r=0), src register in the s field', () => {
+      const word = rrr(0x4, 0x0, 0, 6, 0);
+      expect(decode(word)).toEqual({ op: 'SSR', src: 6 });
+    });
+
+    it('decodes SSL (op1=0,op2=4,r=1)', () => {
+      const word = rrr(0x4, 0x0, 1, 6, 0);
+      expect(decode(word)).toEqual({ op: 'SSL', src: 6 });
+    });
+
+    it('decodes SSAI (op1=0,op2=4,r=4) with a composite 5-bit shift amount', () => {
+      // shift = (t&1)<<4 | s; t=1 (odd, contributes the high bit), s=0xa -> shift=0x1a=26
+      const word = rrr(0x4, 0x0, 4, 0xa, 1);
+      expect(decode(word)).toEqual({ op: 'SSAI', shift: 26 });
+    });
+
+    it('decodes SLL (op1=1,op2=0xa), src in the s field', () => {
+      const word = rrr(0xa, 0x1, 3, 2, 0);
+      expect(decode(word)).toEqual({ op: 'SLL', dest: 3, src: 2 });
+    });
+
+    it('decodes SRL (op1=1,op2=9), src in the t field', () => {
+      const word = rrr(0x9, 0x1, 3, 0, 5);
+      expect(decode(word)).toEqual({ op: 'SRL', dest: 3, src: 5 });
+    });
+
+    it('decodes SRA (op1=1,op2=0xb)', () => {
+      const word = rrr(0xb, 0x1, 3, 0, 5);
+      expect(decode(word)).toEqual({ op: 'SRA', dest: 3, src: 5 });
+    });
+
+    it('decodes SRC (op1=1,op2=8), the funnel shift', () => {
+      const word = rrr(0x8, 0x1, 4, 2, 3);
+      expect(decode(word)).toEqual({ op: 'SRC', dest: 4, src1: 2, src2: 3 });
+    });
+
+    it('decodes SRLI (op1=1,op2=4) with a plain 0-15 shift amount', () => {
+      const word = rrr(0x4, 0x1, 6, 9, 5); // shift = s = 9
+      expect(decode(word)).toEqual({ op: 'SRLI', dest: 6, src: 5, shift: 9 });
+    });
+
+    it('SLLI with salRaw=0 shifts by 0 (the documented "undefined shift by 32" case)', () => {
+      const word = rrr(0x0, 0x1, 4, 2, 0x0); // op2=0,t=0 -> salRaw=0 -> 0x20-0=32, &0x1f=0
+      expect(decode(word)).toEqual({ op: 'SLLI', dest: 4, src: 2, shift: 0 });
+    });
+
+    it('SLLI with a mid-range shift amount', () => {
+      // op2=1 contributes bit4 of salRaw; t=0x8 -> salRaw=0x18=24 -> shift=(32-24)&0x1f=8
+      const word = rrr(0x1, 0x1, 4, 2, 0x8);
+      expect(decode(word)).toEqual({ op: 'SLLI', dest: 4, src: 2, shift: 8 });
+    });
+
+    it('decodes SRAI reassembling shift from op2 LSB + s (identity, no transform)', () => {
+      // op2=3 -> bit4=1; s=0xa -> shift = (1<<4)|0xa = 0x1a = 26
+      const word = rrr(0x3, 0x1, 4, 0xa, 7);
+      expect(decode(word)).toEqual({ op: 'SRAI', dest: 4, src: 7, shift: 26 });
+    });
+  });
 });

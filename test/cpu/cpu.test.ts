@@ -36,6 +36,24 @@ class TestBus implements Bus {
 
 const ADD = (dest: number, s1: number, s2: number) => (0x8 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
 const SUB = (dest: number, s1: number, s2: number) => (0xc << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const AND = (dest: number, s1: number, s2: number) => (0x1 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const OR = (dest: number, s1: number, s2: number) => (0x2 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const XOR = (dest: number, s1: number, s2: number) => (0x3 << 20) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const NEG = (dest: number, src: number) => (0x6 << 20) | (dest << 12) | (0 << 8) | (src << 4);
+const ABS = (dest: number, src: number) => (0x6 << 20) | (dest << 12) | (1 << 8) | (src << 4);
+const SSR = (src: number) => (0x4 << 20) | (0 << 12) | (src << 8);
+const SSL = (src: number) => (0x4 << 20) | (1 << 12) | (src << 8);
+const SSAI = (shift: number) => (0x4 << 20) | (4 << 12) | ((shift & 0xf) << 8) | (((shift >> 4) & 0x1) << 4);
+const SLL = (dest: number, src: number) => (0xa << 20) | (0x1 << 16) | (dest << 12) | (src << 8);
+const SRL = (dest: number, src: number) => (0x9 << 20) | (0x1 << 16) | (dest << 12) | (src << 4);
+const SRA = (dest: number, src: number) => (0xb << 20) | (0x1 << 16) | (dest << 12) | (src << 4);
+const SRC = (dest: number, s1: number, s2: number) => (0x8 << 20) | (0x1 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const SLLI = (dest: number, src: number, shift: number) => {
+  const salRaw = (0x20 - shift) & 0x1f;
+  return (((salRaw >> 4) & 0x1) << 20) | (0x1 << 16) | (dest << 12) | (src << 8) | ((salRaw & 0xf) << 4);
+};
+const SRAI = (dest: number, src: number, shift: number) => (((shift >> 4) & 0x1) << 20) | (0x2 << 20) | (0x1 << 16) | (dest << 12) | ((shift & 0xf) << 8) | (src << 4);
+const SRLI = (dest: number, src: number, shift: number) => (0x4 << 20) | (0x1 << 16) | (dest << 12) | ((shift & 0xf) << 8) | (src << 4);
 const RET = 0x000080;
 const MOVI = (dest: number, imm: number) => {
   const raw12 = imm & 0xfff;
@@ -458,6 +476,140 @@ describe('Cpu fetch/execute', () => {
       cpu.step(); // CALL0
       cpu.step(); // RET.N
       expect(cpu.pc).toBe(3);
+    });
+  });
+
+  describe('logical and shift instructions', () => {
+    it.each([
+      ['AND', AND, (a: number, b: number) => a & b],
+      ['OR', OR, (a: number, b: number) => a | b],
+      ['XOR', XOR, (a: number, b: number) => a ^ b],
+    ] as const)('runs %s', (_name, encode, op) => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0b1100));
+      bus.writeInsn(3, MOVI(2, 0b1010));
+      bus.writeInsn(6, encode(3, 1, 2));
+
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe(op(0b1100, 0b1010) >>> 0);
+    });
+
+    it('NEG negates and wraps to an unsigned 32-bit result', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 5));
+      bus.writeInsn(3, NEG(2, 1));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe((-5) >>> 0);
+    });
+
+    it('ABS takes the absolute value of a signed register', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, -7));
+      bus.writeInsn(3, ABS(2, 1));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe(7);
+    });
+
+    it('SSR + SRL: right-shifts using the register-supplied amount', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 4)); // shift amount
+      bus.writeInsn(3, SSR(1));
+      bus.writeInsn(6, MOVI(2, 0x100));
+      bus.writeInsn(9, SRL(3, 2));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe(0x100 >>> 4);
+    });
+
+    it('SSR + SRA: preserves sign when shifting right', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 2));
+      bus.writeInsn(3, SSR(1));
+      bus.writeInsn(6, MOVI(2, -16));
+      bus.writeInsn(9, SRA(3, 2));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe((-16 >> 2) >>> 0);
+    });
+
+    it('SSL + SLL: left-shifts using SAR\'s 32-complement encoding', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 3)); // intended left-shift amount
+      bus.writeInsn(3, SSL(1)); // SAR = 32 - 3 = 29
+      bus.writeInsn(6, MOVI(2, 5));
+      bus.writeInsn(9, SLL(3, 2)); // shiftAmt = (32-29)&0x3f = 3
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe(5 << 3);
+    });
+
+    it('SSL by 0 is a no-op shift for SLL (round-trips through the 32-complement encoding)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0)); // intended left-shift amount: 0
+      bus.writeInsn(3, SSL(1)); // SAR = 32 - 0 = 32
+      bus.writeInsn(6, MOVI(2, 0x123)); // within MOVI's +/-2048..2047 range
+      bus.writeInsn(9, SLL(3, 2)); // shiftAmt = (32-32)&0x3f = 0
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe(0x123);
+    });
+
+    it('SLL shifts out entirely (result 0) when the effective amount is 32', () => {
+      const { cpu, bus } = makeCpu();
+      // Craft SAR=0 directly (as if SSR had run with a register holding 0),
+      // so SLL's (32-SAR)&0x3f formula evaluates to exactly 32.
+      bus.writeInsn(0, MOVI(1, 0));
+      bus.writeInsn(3, SSR(1)); // SAR = 0
+      bus.writeInsn(6, MOVI(2, 0x123));
+      bus.writeInsn(9, SLL(3, 2)); // shiftAmt = (32-0)&0x3f = 32
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe(0);
+    });
+
+    it('SRC funnel-shifts a {src1:src2} pair right by SAR', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 4));
+      bus.writeInsn(3, SSR(1)); // SAR = 4
+      bus.writeInsn(6, MOVI(2, 0x1)); // high word
+      bus.writeInsn(9, MOVI(3, 0x0)); // low word
+      bus.writeInsn(12, SRC(4, 2, 3)); // (0x1_00000000 >> 4) & 0xffffffff
+
+      for (let i = 0; i < 5; i++) cpu.step();
+      expect(cpu.regs.get(4)).toBe(0x10000000);
+    });
+
+    it('SLLI/SRAI/SRLI shift by an immediate with no SAR involved', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 3));
+      bus.writeInsn(3, SLLI(2, 1, 4));
+      bus.writeInsn(6, MOVI(1, -16));
+      bus.writeInsn(9, SRAI(3, 1, 2));
+      bus.writeInsn(12, MOVI(1, 0x100));
+      bus.writeInsn(15, SRLI(4, 1, 4));
+
+      for (let i = 0; i < 6; i++) cpu.step();
+      expect(cpu.regs.get(2)).toBe(3 << 4);
+      expect(cpu.regs.get(3)).toBe((-16 >> 2) >>> 0);
+      expect(cpu.regs.get(4)).toBe(0x100 >>> 4);
+    });
+
+    it('SSAI sets SAR directly from an immediate (no register read)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, SSAI(4));
+      bus.writeInsn(3, MOVI(1, 0x100));
+      bus.writeInsn(6, SRL(2, 1));
+
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe(0x100 >>> 4);
     });
   });
 });
