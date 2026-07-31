@@ -25,12 +25,14 @@
  *
  * `onReset` is called for a software system/PROCPU reset
  * (`RTC_CNTL_OPTIONS0`'s SW_SYS_RESET/SW_PROCPU_RESET bits, matching
- * `esp_restart()`'s real mechanism) - this repo doesn't itself reset a
- * `Cpu`/`RegisterFile` (there's no defined "reset a running machine" flow
- * yet), so this is exposed as a hook for an embedder to act on rather than
- * silently doing nothing. The register-level bit self-clear and reset-cause
- * tracking (readable via `RTC_CNTL_RESET_STATE`, matching real
- * `esp_reset_reason()`) work regardless of whether anything is listening.
+ * `esp_restart()`'s real mechanism) and for a watchdog-triggered reset
+ * (`triggerWdtReset`, driven by `peripherals/timer.ts`'s `Timg.onWdtReset`
+ * via `soc/bus.ts`) - this repo doesn't itself reset a `Cpu`/`RegisterFile`
+ * (there's no defined "reset a running machine" flow yet), so this is
+ * exposed as a hook for an embedder to act on rather than silently doing
+ * nothing. The register-level bit self-clear and reset-cause tracking
+ * (readable via `RTC_CNTL_RESET_STATE`, matching real `esp_reset_reason()`)
+ * work regardless of whether anything is listening.
  *
  * Not implemented: SW_APPCPU_RESET's effect and the SW_CPU_STALL/
  * OPTIONS0 stall-magic-value mechanism's effect (both concern a second
@@ -61,10 +63,18 @@ export const RTC_CNTL_REG = {
 /** Byte size of the register window (ESP32_RTC_CNTL_SIZE = A_RTC_CNTL_DATE + 4). */
 export const RTC_CNTL_WINDOW_SIZE = RTC_CNTL_REG.DATE + 4;
 
-/** Esp32ResetCause values actually reachable from this peripheral's own writes. */
+/**
+ * Esp32ResetCause values reachable from this peripheral's own writes, plus
+ * the two real ESP32 reset causes attributed to TIMG's watchdog
+ * (`ESP32_TG0WDT_SYS_RESET`/`ESP32_TGWDT_CPU_RESET`, `esp32_rtc_cntl.h`) -
+ * `peripherals/timer.ts`'s `Timg.onWdtReset` triggers these via
+ * `triggerWdtReset` below, wired up by `soc/bus.ts`.
+ */
 export const RESET_CAUSE = {
   POWERON_RESET: 1,
   SW_SYS_RESET: 3,
+  TG0WDT_SYS_RESET: 7,
+  TGWDT_CPU_RESET: 11,
   SW_CPU_RESET: 12,
 } as const;
 
@@ -88,8 +98,28 @@ export class RtcCntl {
   private slowClkSel = 0;
   private swCpuStall = 0;
 
-  /** Fires on a software system or PROCPU reset (RTC_CNTL_OPTIONS0's SW_SYS_RESET/SW_PROCPU_RESET bits). */
-  onReset?: (cause: 'sys' | 'procpu') => void;
+  /**
+   * Fires on a software system or PROCPU reset (RTC_CNTL_OPTIONS0's
+   * SW_SYS_RESET/SW_PROCPU_RESET bits), or on a watchdog-triggered reset
+   * (`triggerWdtReset`, wired from `Timg.onWdtReset` by `soc/bus.ts`).
+   */
+  onReset?: (cause: 'sys' | 'procpu' | 'wdt-cpu' | 'wdt-sys') => void;
+
+  /**
+   * A timer group's watchdog reached a stage configured as CPU-reset or
+   * system-reset (`Timg.onWdtReset`) - records the matching real reset
+   * cause and fires `onReset`, the same as a software-triggered reset does.
+   */
+  triggerWdtReset(kind: 'cpu' | 'sys'): void {
+    if (kind === 'cpu') {
+      this.resetCauseProCpu = RESET_CAUSE.TGWDT_CPU_RESET;
+      this.onReset?.('wdt-cpu');
+    } else {
+      this.resetCauseProCpu = RESET_CAUSE.TG0WDT_SYS_RESET;
+      this.resetCauseAppCpu = RESET_CAUSE.TG0WDT_SYS_RESET;
+      this.onReset?.('wdt-sys');
+    }
+  }
 
   readWord(offset: number): number {
     switch (offset) {
