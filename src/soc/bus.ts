@@ -1,6 +1,6 @@
 /**
  * A real, byte-backed memory bus over the SoC address map in `memmap.ts`,
- * with UART0 and GPIO wired up as live peripherals.
+ * with UART0, GPIO, and TIMG0 wired up as live peripherals.
  *
  * This is the first thing in the project backed by actual bytes rather than
  * a test double: `cpu/cpu.ts`'s `Bus` interface can now be satisfied by
@@ -23,9 +23,9 @@
  * being explicit about rather than silently correct only by accident.
  *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
- *   - Every other peripheral block in `PERIPHERAL_BASE` besides UART0/GPIO
- *     isn't backed at all - accessing them behaves like any other unmapped
- *     address.
+ *   - Every other peripheral block in `PERIPHERAL_BASE` besides
+ *     UART0/GPIO/TIMG0 isn't backed at all - accessing them behaves like any
+ *     other unmapped address.
  *   - No read-only enforcement on DROM/IROM (real flash-backed regions) -
  *     nothing stops a write from landing in "ROM" here.
  *   - Unmapped access doesn't raise LOAD_STORE_ERROR_CAUSE - it silently
@@ -39,6 +39,7 @@
 
 import type { Bus } from '../cpu/cpu.js';
 import { Gpio, GPIO_WINDOW_SIZE } from '../peripherals/gpio.js';
+import { Timg, TIMG_WINDOW_SIZE } from '../peripherals/timer.js';
 import { Uart0, UART_WINDOW_SIZE } from '../peripherals/uart.js';
 import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE, regionAt } from './memmap.js';
 
@@ -58,6 +59,7 @@ export class SystemBus implements Bus {
   private readonly peripherals: readonly PeripheralSlot[];
   readonly uart0 = new Uart0();
   readonly gpio = new Gpio();
+  readonly timg0 = new Timg();
 
   constructor() {
     const regions = {} as Record<MemoryRegionName, Uint8Array>;
@@ -68,6 +70,7 @@ export class SystemBus implements Bus {
     this.peripherals = [
       { base: PERIPHERAL_BASE.uart0, size: UART_WINDOW_SIZE, device: this.uart0 },
       { base: PERIPHERAL_BASE.gpio, size: GPIO_WINDOW_SIZE, device: this.gpio },
+      { base: PERIPHERAL_BASE.timg0, size: TIMG_WINDOW_SIZE, device: this.timg0 },
     ];
   }
 

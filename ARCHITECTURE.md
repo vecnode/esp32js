@@ -36,7 +36,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
 | `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | + IO_MUX (`hw/esp32/esp32_iomux.c`) for pin function select - not started |
-| `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` | TIMG0/TIMG1, each with a watchdog |
+| `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (registers + WDT unlock/feed, no free-running clock)**, see Phase 4 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32.c` interrupt source enum | peripheral IRQ → CPU interrupt line |
@@ -306,6 +306,35 @@ ACPU_INT) - meaningless without a wired interrupt matrix
 (`peripherals/intmatrix.ts`, not started); the IO_MUX-driven signal routing
 matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a GPIO
 to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O -
-out of scope until IO_MUX itself exists. Every other peripheral in
-`PERIPHERAL_BASE` (TIMG0/1, SAR ADC, interrupt matrix, IO_MUX) remains
-fully open.
+out of scope until IO_MUX itself exists.
+
+`peripherals/timer.ts`'s `Timg` (TIMG0's registers + WDT unlock/feed) is
+the third live peripheral, from `include/hw/esp32/esp32_timg.h`/`hw/esp32/
+esp32_timg.c`. A scope decision here is worth restating plainly rather than
+leaving implicit: the reference paces T0/T1's counters against real elapsed
+wall-clock time (`qemu_clock_get_ns`, scaled by a configured divider) and
+fires alarm interrupts via a `QEMUTimer` callback - this interpreter has no
+notion of elapsed time at all (`Cpu.step()` executes one instruction with
+no time cost attached), so there's nothing correct to scale a counter
+against yet. Rather than invent an arbitrary "N ticks per step" model that
+would look plausible but correspond to nothing in the reference, T0/T1's
+counters are plain stored values, set only by `TxLOAD`/`LOADLO`/`LOADHI`
+and never advancing on their own; `TxUPDATE` (which normally samples the
+live count) is consequently a no-op. The watchdog's *unlock/lock/feed*
+mechanism (`TIMG_WDTPROTECT`'s magic-word gate at `0x50D83AA1`,
+`TIMG_WDTFEED`) has no such timing dependency and is exactly what real boot
+firmware needs to interact with correctly (disable or feed the watchdog
+early in `app_main`), so it's implemented faithfully even though the
+watchdog itself never actually times out here. `test/soc/bus.test.ts`
+includes a real "disable the watchdog" boot idiom test (unlock, clear
+WDTCONFIG0's EN bit, re-lock) run through `S32I` end to end.
+
+Not implemented for TIMG0: any interrupt ever actually firing
+(`TIMG_INT_RAW` is never set by this peripheral - same root cause as the
+counters, plus no interrupt matrix to deliver through); LACT (the legacy
+always-on RTC timer) and RTC calibration registers; TIMG1 as a wired second
+instance (the `Timg` class itself is instance-agnostic and works for
+either, only TIMG0 is connected to `soc/bus.ts` so far).
+
+Every other peripheral in `PERIPHERAL_BASE` (SAR ADC, interrupt matrix,
+IO_MUX) remains fully open.
