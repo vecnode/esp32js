@@ -86,6 +86,7 @@ export type Decoded =
   | { op: 'RFWU' }
   | { op: 'RSIL'; dest: number; level: number }
   | { op: 'RFI'; level: number }
+  | { op: 'RFE' }
   | { op: 'RSR' | 'WSR'; sr: number; reg: number };
 
 /** Sign-extend the low `bits` bits of `value` to a 32-bit signed int. */
@@ -152,9 +153,10 @@ export function decode(word: number): Decoded {
           }
           // RSIL: r=6 (fixed), dest=t, level=s (immediate 0-15)
           if (r === 0x6) return { op: 'RSIL', dest: t, level: s };
-          // r=3 family: t=0 -> RFWO/RFWU (sub-selected by s); t=1 -> RFI (level=s)
+          // r=3 family: t=0 -> RFE(s=0)/RFWO(s=4)/RFWU(s=5); t=1 -> RFI (level=s)
           if (r === 0x3) {
             if (t === 0x0) {
+              if (s === 0x0) return { op: 'RFE' };
               if (s === 0x4) return { op: 'RFWO' };
               if (s === 0x5) return { op: 'RFWU' };
             }

@@ -31,14 +31,15 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 |---|---|---|
 | `cpu/registers.ts` | `target/xtensa/win_helper.c` | done — windowed register file |
 | `cpu/decode.ts`, `cpu/cpu.ts` | `target/xtensa/translate.c` (7672 lines) | opcode decode + ALU/load-store/branch semantics |
-| `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | **mostly done**, but living directly on `Cpu` rather than a separate module - see Phase 2 status. Interrupt levels 1-6 dispatch, RSIL/RFI/WSR.PS/RSR.PS/WSR.INTENABLE/RSR.INTENABLE all real; still open: NMI (level 7), interrupt *type* beyond level-triggered, RFE (return from a level-1 exception/interrupt) |
+| `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | **done**, but living directly on `Cpu` rather than a separate module - see Phase 2 status. Interrupt levels 1-7 dispatch (level 7 = NMI, unmaskable), RSIL/RFI/RFE/WSR.PS/RSR.PS/WSR.INTENABLE/RSR.INTENABLE all real; still open: interrupt *type* beyond level-triggered |
 | `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` | single-precision only (`XCHAL_HAVE_DFP=0`) |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
-| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | + IO_MUX (`hw/esp32/esp32_iomux.c`) for pin function select - not started |
+| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
+| `peripherals/iomux.ts` | `hw/esp32/esp32_iomux.c` — **done (per-pin register storage)**, see Phase 4 status | pins 28-31 undocumented in the reference itself, omitted here too; no GPIO function-select side effects |
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (registers + WDT unlock/feed, no free-running clock)**, see Phase 4 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
-| `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
+| `peripherals/adc.ts` | `hw/esp32/esp32_sens.c` — **done (ADC1/ADC2 channel select + injected value read)**, see Phase 4 status | touch sensor channels and ADC_ATTEN/width config not modeled |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
 | `soc/dport.ts` | `hw/esp32/esp32_dport.c` — **done (APPCPU control + CPU_PER_CONF + cache-enable storage only)**, see Phase 3 status | CPU control, cache config, PSRAM enable - PSRAM/MMU/flash-encryption still open |
@@ -72,7 +73,7 @@ DevKit boards.
 
 DPORT `0x3ff00000`, AES `0x3ff01000`, RSA `0x3ff02000`, SHA `0x3ff03000`,
 UART0 `0x3ff40000`, SPI1 `0x3ff42000`, SPI0 `0x3ff43000`, GPIO `0x3ff44000`,
-RTC_CNTL `0x3ff48000`, IO_MUX `0x3ff49000`, I2S0 `0x3ff4f000`,
+RTC_CNTL `0x3ff48000`, SENS `0x3ff48800`, IO_MUX `0x3ff49000`, I2S0 `0x3ff4f000`,
 UART1 `0x3ff50000`, I2C0 `0x3ff53000`, RMT `0x3ff56000`, LEDC `0x3ff59000`,
 EFUSE `0x3ff5a000`, TIMG0 `0x3ff5f000`, TIMG1 `0x3ff60000`, SPI2 `0x3ff64000`,
 SPI3 `0x3ff65000`, I2C1 `0x3ff67000`, SDMMC `0x3ff68000`, UART2 `0x3ff6e000`.
@@ -237,17 +238,26 @@ level-4 interrupt correctly preempting a level-2 one already in progress
 (exercising `xtensa_get_cintlevel`'s `PS.EXCM` escalation, not just
 `PS.INTLEVEL` alone), and RSIL/WSR.PS's critical-section pattern.
 
+NMI (level 7) is now modeled too: `checkInterrupts` checks the ESP32's real
+hardware-fixed NMI line (line 14) unconditionally, before the normal
+INTENABLE/cintlevel-gated scan, matching `handle_interrupt`'s `level ==
+nmi_level` OR-clause in `exc_helper.c` - NMI bypasses both the
+interrupt-enable mask and the current CPU interrupt level entirely, exactly
+as real hardware does. It reuses the same per-level saved-PC/PS-snapshot and
+vector-slot machinery as levels 2-6 (`VEC_INTLEVEL[7] = 0x2c0`,
+`XCHAL_NMI_VECOFS`). `RFE` (return from a level-1 exception/interrupt/
+illegal-instruction/divide-by-zero - all of which share EPC1 as their one
+save slot) is implemented too: it clears `PS.EXCM` and jumps to `EPC1`,
+matching `translate_rfe` exactly; `RFWO`/`RFWU` (the same `r=3` opcode
+family, `t=0`, `s=4`/`5`) are decoded but not executed, since nothing in
+this repo's windowed-register model needs them yet.
+
 Not modeled: PS.CALLINC is a single `pendingCallinc` field rather than part
-of a full PS register; NMI (level 7) - unmaskable on real hardware
-(bypasses the `cintlevel` gate entirely), skipped since nothing raises it
-yet; interrupt *type* (level/edge/software/timer/NMI,`XCHAL_INTn_TYPE`) -
-every line here behaves as level-type, true for ESP32's real peripheral
-lines but not for edge/software/timer lines, which would need real
-WSR.INTSET/INTCLEAR semantics this repo doesn't have; RFE (return from a
-level-1 exception/interrupt) - illegal-instruction/divide-by-zero/level-1-
-interrupt vectoring was already exercised without a full return in earlier
-tests, and that scope boundary carries forward unchanged. EXCCAUSE isn't a
-modeled register - 'illegal', 'divide-by-zero', and 'interrupt' are the
+of a full PS register; interrupt *type* (level/edge/software/timer/NMI,
+`XCHAL_INTn_TYPE`) - every line here behaves as level-type, true for ESP32's
+real peripheral lines but not for edge/software/timer lines, which would
+need real WSR.INTSET/INTCLEAR semantics this repo doesn't have. EXCCAUSE
+isn't a modeled register - 'illegal', 'divide-by-zero', and 'interrupt' are the
 only general-exception causes that exist so far, distinguished purely by
 the `ExceptionCause` tag; VECBASE still has no WSR/RSR instruction wired to
 it (tests set it directly). BREAK.N and ILL.N (debug breakpoint and
@@ -364,7 +374,10 @@ a live per-pin interrupt condition to feed into it, since GPIO's own
 `gpio_pin[]` int_type config isn't modeled; the IO_MUX-driven signal
 routing matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a
 GPIO to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O
-- out of scope until IO_MUX itself exists.
+- `peripherals/iomux.ts` now backs IO_MUX's own per-pin MUX_GPIOn register
+storage (see below), but nothing connects a pin's stored function-select
+value back into `Gpio`'s behavior yet, so `Gpio` still always behaves as
+raw digital I/O regardless of what's written there.
 
 `peripherals/timer.ts`'s `Timg` (TIMG0's registers + WDT unlock/feed) is
 the third live peripheral, from `include/hw/esp32/esp32_timg.h`/`hw/esp32/
@@ -425,5 +438,37 @@ is real and independently testable today, as shown above). Multiple
 sources mapped to the same CPU line aren't OR'd - matching the reference's
 own literal behavior (last event wins) rather than "improving" on it.
 
-Every other peripheral in `PERIPHERAL_BASE` (SAR ADC, IO_MUX) remains fully
-open.
+`peripherals/iomux.ts`'s `IoMux` is the fifth live peripheral, from
+`include/hw/esp32/esp32_iomux.h`/`hw/esp32/esp32_iomux.c`. It's plain
+per-pin register storage - real hardware's offset-to-pin mapping is
+genuinely irregular (it follows the physical pin/pad layout, not GPIO
+number order), so `OFFSET_TO_PIN` is transcribed directly from the
+reference's per-case switch statement rather than derived from a formula;
+pins 28-31 are commented out in the reference itself ("Not documented") and
+are omitted here too. The reference's `esp32_iomux_write` also calls
+`qemu_set_irq(s->iomux_sync[0], ...)` to notify `Gpio` that a pin's routed
+function changed - not implemented, since this repo's `Gpio` is
+unconditionally raw digital I/O and has nothing for that notification to
+usefully drive yet (see `gpio.ts`'s own doc comment).
+
+`peripherals/adc.ts`'s `Adc` is the sixth live peripheral (SAR ADC / SENS),
+from `include/hw/esp32/esp32_sens.h`/`hw/esp32/esp32_sens.c`. ADC1 and ADC2
+each have their own "start conversion" register (`SENS_MEAS1/2_START_SAR`):
+writing it encodes the channel to sample as a one-hot bitmask in
+bits[30:19] (`bitpos()`, matching the reference, finds which single bit is
+set); reading it back returns `0x10000 | adcValue[channel]` - bit16 is the
+real hardware's conversion-done flag, modeled here as always "done"
+immediately, since there's no real ADC hardware taking time to convert.
+ADC2's channel indexes into the *same* 32-entry value array as ADC1,
+offset by 8 (`ADC_values[channel2 + 8]`) - replicated exactly rather than
+giving ADC2 its own array, since that's what the reference actually does.
+`setChannelValue`/`getChannelValue` are this peripheral's equivalent of
+`Gpio.setPin`/`getPin` - the entry point for injecting a simulated analog
+reading from outside the chip. Not implemented: touch sensor channels (the
+reference's own touch model folds in `rand()` noise and
+physicalsim-specific calibration constants that aren't meaningful to
+reproduce without the same calibration data); ADC_ATTEN/width configuration
+registers, which the reference itself doesn't back either.
+
+Every other peripheral in `PERIPHERAL_BASE` besides UART0/GPIO/TIMG0/
+RTC_CNTL/DPORT/interrupt-matrix/IO_MUX/SENS remains fully open.
