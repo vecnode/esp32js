@@ -122,12 +122,13 @@ Phase 1: SoC memory map (`soc/memmap.ts`) and the three board definitions
 (`boards/`), both pure data validated against the addresses above.
 
 Phase 2 (in progress): `cpu/decode.ts` + `cpu/cpu.ts` implement a fetch/
-execute loop covering both instruction widths - 24-bit (ADD, SUB, AND, OR,
-XOR, NEG, ABS, MOVI, L32I, S32I, L32R, L32E, S32E, J, BEQ/BNE/BLT/BGE,
-CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU, SLL, SRL, SRA, SRC, SLLI,
-SRAI, SRLI, SSR, SSL, SSAI) and 16-bit density (ADD.N, ADDI.N, L32I.N,
-S32I.N, MOVI.N, BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N) - enough to
-run hand-assembled control flow including a full windowed call/return sequence
+execute loop covering both instruction widths - 24-bit (ADD, SUB, ADDI, AND,
+OR, XOR, NEG, ABS, NSA, NSAU, MULL, QUOU, QUOS, REMU, REMS, MOVI, L32I,
+S32I, L32R, L32E, S32E, J, BEQ/BNE/BLT/BGE, CALL0, CALL4/8/12, ENTRY, RET,
+RETW, RFWO, RFWU, SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI) and
+16-bit density (ADD.N, ADDI.N, L32I.N, S32I.N, MOVI.N, BEQZ.N, BNEZ.N,
+MOV.N, RET.N, RETW.N, NOP.N) - enough to run hand-assembled control flow
+including a full windowed call/return sequence
 that exercises `cpu/registers.ts`'s rotate/markFrameLive/isFrameLive
 mechanics end to end (previously untested). Bit layouts, PC-relocation
 formulas, and exception-vectoring semantics were pulled from this repo's
@@ -174,11 +175,27 @@ rather than assumed:
     interpreter (which has no equivalent of "the same translation block")
     doesn't need to reproduce it - it just always applies the one formula.
 
+ADDI (24-bit; ADDI.N's density counterpart already existed), NSA/NSAU
+(leading-sign/zero-bit count, using `Math.clz32` - `NSA`'s clrsb semantics
+needs a small correction for negative inputs, `Math.clz32(~v)`, verified
+against `tcg_gen_clrsb_i32`/`tcg_gen_clzi_i32` in translate.c rather than
+assumed), MULL (32x32->32 multiply, via `Math.imul` for correct wraparound),
+and the div32 family (QUOU/QUOS/REMU/REMS) round out the RRR opcode space
+further. QUOS/REMS special-case `INT_MIN / -1` (translate_quos in
+translate.c shares one function for both opcodes via a `par[0]` flag) to
+return INT_MIN/0 respectively rather than overflow a 32-bit result. All
+four raise a genuine divide-by-zero exception through the same general
+path as illegal instructions (`gen_zero_check` in translate.c checks the
+divisor before the divide itself runs, not after) - `ExceptionCause` grew a
+`'divide-by-zero'` kind for this, and `raiseIllegal` was generalized into
+`raiseGeneralException` so both causes share the double-exception
+escalation logic instead of duplicating it.
+
 A minimal exception model now exists directly on `Cpu`: PS.EXCM, PS.OWB,
 EPC1, and a configurable VECBASE (defaulting to its hardware reset value,
-`0x40000000`). Illegal instructions, double exceptions, and window
-over/underflow all vector to their real, correctly-offset targets exactly
-as `HELPER(exception_cause)`/`HELPER(window_check)`/
+`0x40000000`). Illegal instructions, divide-by-zero, double exceptions, and
+window over/underflow all vector to their real, correctly-offset targets
+exactly as `HELPER(exception_cause)`/`HELPER(window_check)`/
 `HELPER(test_underflow_retw)` do; `Cpu.step()` never throws or halts for
 these - it vectors and keeps going, exposing what happened (if anything)
 via `Cpu.lastException`, matching how real silicon has no "stuck" state.
@@ -191,21 +208,21 @@ state and successfully retries the faulting instruction.
 
 Not modeled: PS.CALLINC is a single `pendingCallinc` field rather than part
 of a full PS register; PS.INTLEVEL and interrupts generally aren't
-implemented (only the exception side); EXCCAUSE only ever needs to
-represent "illegal instruction" so it isn't a modeled register, just an
-`ExceptionCause` tag; VECBASE has no WSR/RSR instruction wired to it yet
-(tests set it directly). BREAK.N and ILL.N (debug breakpoint and
-guaranteed-illegal, both rare in ordinary compiled code) aren't specially
-handled - they fall through to the same ILLEGAL path as any unrecognized
-opcode, which happens to be correct for ILL.N and an acceptable stand-in
-for BREAK.N until debug exceptions exist. The 24-bit ADDI (only its ADDI.N
-density counterpart exists), SSA8L/SSA8B (byte-alignment shift setup, a
-narrower-use variant of SSL/SSR), NSA/NSAU (leading-sign/zero-bit count),
-and MUL/multiply-family instructions are still unimplemented. A real PS
-register, interrupt levels, and the rest of `translate.c`'s opcode set
-(plus `cpu/fpu.ts`) remain open for Phase 2; `cpu/exceptions.ts` as a
-separate module may or may not end up warranted once PS/EPC1 grow further -
-right now that state lives directly on `Cpu` since it's small.
+implemented (only the exception side); EXCCAUSE isn't a modeled register -
+'illegal' and 'divide-by-zero' are the only general-exception causes that
+exist so far, distinguished purely by the `ExceptionCause` tag; VECBASE has
+no WSR/RSR instruction wired to it yet (tests set it directly). BREAK.N and
+ILL.N (debug breakpoint and guaranteed-illegal, both rare in ordinary
+compiled code) aren't specially handled - they fall through to the same
+ILLEGAL path as any unrecognized opcode, which happens to be correct for
+ILL.N and an acceptable stand-in for BREAK.N until debug exceptions exist.
+SSA8L/SSA8B (byte-alignment shift setup, a narrower-use variant of
+SSL/SSR), MUL16U/MUL16S/MULUH/MULSH (16-bit and high-word multiply - only
+the 32x32->32-low MULL is implemented), and MAC16 are still unimplemented.
+A real PS register, interrupt levels, and the rest of `translate.c`'s
+opcode set (plus `cpu/fpu.ts`) remain open for Phase 2; `cpu/exceptions.ts`
+as a separate module may or may not end up warranted once PS/EPC1 grow
+further - right now that state lives directly on `Cpu` since it's small.
 
 Phase 3 (started): `soc/bus.ts`'s `SystemBus` is the first thing in the
 project backed by real bytes rather than a test double - one `Uint8Array`
