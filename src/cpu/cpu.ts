@@ -126,6 +126,7 @@
  */
 
 import { decode, instructionLength } from './decode.js';
+import { Fpu, ftoiS, ftouiS, itofS, uitofS } from './fpu.js';
 import type { RegisterFile } from './registers.js';
 
 export interface Bus {
@@ -198,6 +199,7 @@ function ctz32(x: number): number {
 export class Cpu {
   pc: number;
   readonly regs: RegisterFile;
+  readonly fpu = new Fpu();
   private readonly bus: Bus;
 
   vecbase = VECBASE_RESET;
@@ -634,6 +636,60 @@ export class Cpu {
         else if (inst.sr === SR_INTENABLE) this.regs.set(inst.reg, this.intenable >>> 0);
         else nextPc = this.raiseIllegal(pc); // unbacked special register
         break;
+      case 'ADD_S':
+        this.fpu.setFr(inst.dest, Math.fround(this.fpu.getFr(inst.src1) + this.fpu.getFr(inst.src2)));
+        break;
+      case 'SUB_S':
+        this.fpu.setFr(inst.dest, Math.fround(this.fpu.getFr(inst.src1) - this.fpu.getFr(inst.src2)));
+        break;
+      case 'MUL_S':
+        this.fpu.setFr(inst.dest, Math.fround(this.fpu.getFr(inst.src1) * this.fpu.getFr(inst.src2)));
+        break;
+      case 'MOV_S':
+        this.fpu.setFr(inst.dest, this.fpu.getFr(inst.src));
+        break;
+      case 'NEG_S':
+        this.fpu.setFr(inst.dest, -this.fpu.getFr(inst.src));
+        break;
+      case 'ABS_S':
+        this.fpu.setFr(inst.dest, Math.abs(this.fpu.getFr(inst.src)));
+        break;
+      case 'WFR':
+        this.fpu.writeFrBits(inst.dest, this.regs.get(inst.src));
+        break;
+      case 'RFR':
+        this.regs.set(inst.dest, this.fpu.readFrBits(inst.src));
+        break;
+      case 'FLOAT_S':
+        this.fpu.setFr(inst.dest, itofS(this.regs.get(inst.src), -inst.scale));
+        break;
+      case 'UFLOAT_S':
+        this.fpu.setFr(inst.dest, uitofS(this.regs.get(inst.src), -inst.scale));
+        break;
+      case 'TRUNC_S':
+        this.regs.set(inst.dest, ftoiS(this.fpu.getFr(inst.src), inst.scale) >>> 0);
+        break;
+      case 'UTRUNC_S':
+        this.regs.set(inst.dest, ftouiS(this.fpu.getFr(inst.src), inst.scale));
+        break;
+      case 'OEQ_S':
+        this.fpu.setBr(inst.dest, this.fpu.getFr(inst.src1) === this.fpu.getFr(inst.src2));
+        break;
+      case 'OLT_S':
+        this.fpu.setBr(inst.dest, this.fpu.getFr(inst.src1) < this.fpu.getFr(inst.src2));
+        break;
+      case 'OLE_S':
+        this.fpu.setBr(inst.dest, this.fpu.getFr(inst.src1) <= this.fpu.getFr(inst.src2));
+        break;
+      case 'UN_S':
+        this.fpu.setBr(inst.dest, Number.isNaN(this.fpu.getFr(inst.src1)) || Number.isNaN(this.fpu.getFr(inst.src2)));
+        break;
+      case 'BT':
+      case 'BF': {
+        const taken = inst.op === 'BT' ? this.fpu.getBr(inst.src) : !this.fpu.getBr(inst.src);
+        if (taken) nextPc = (pc + 4 + inst.offset) >>> 0;
+        break;
+      }
       case 'WSR':
         if (inst.sr === SR_PS) this.unpackPs(this.regs.get(inst.reg));
         else if (inst.sr === SR_INTENABLE) this.intenable = this.regs.get(inst.reg) >>> 0;
