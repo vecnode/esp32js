@@ -58,6 +58,12 @@
  * `HELPER(window_check)`/`HELPER(test_underflow_retw)` do. VECBASE defaults
  * to its hardware reset value, `XCHAL_VECBASE_RESET_VADDR` (0x40000000).
  *
+ * SAR (shift amount register, `this.sar`): SSR/SSAI store the amount
+ * directly, SSL stores its 32's-complement - see the field's own doc
+ * comment for why SLL/SRL/SRA/SRC don't need to track which of those set it
+ * last. SLLI/SRAI/SRLI take their shift amount from the instruction itself
+ * instead and never touch SAR.
+ *
  * Nothing here throws for a bad-but-real CPU condition (ARCHITECTURE.md):
  * illegal opcodes and window over/underflow are all handled by vectoring,
  * same as real silicon - `step()` always returns normally, and callers
@@ -113,6 +119,20 @@ export class Cpu {
   epc1 = 0;
   /** Set by step() when an exception fired this step; null otherwise. */
   lastException: ExceptionCause | null = null;
+
+  /**
+   * SAR (shift amount register). SSR/SSAI store the amount directly (0-31);
+   * SSL stores its 32's-complement instead (1-32), so SAR alone doesn't say
+   * which "mode" was last set - but that's fine, because real hardware
+   * doesn't track a mode either: SLL always computes its shift amount as
+   * `(32 - SAR) & 0x3f` and SRL/SRA/SRC always use SAR directly, regardless
+   * of whether SSR or SSL set it last (verified against `translate_sll`'s
+   * fallback path in translate.c, which is mathematically identical to the
+   * "fast path" QEMU takes when it can prove SSL ran most recently in the
+   * same translation block - that fast path is a compile-time optimization,
+   * not a distinct runtime behavior, so this interpreter doesn't need it).
+   */
+  sar = 0;
 
   /**
    * Stand-in for PS.CALLINC: the quad-count set by the most recent CALLN,
@@ -175,6 +195,59 @@ export class Cpu {
         break;
       case 'SUB':
         this.regs.set(inst.dest, (this.regs.get(inst.src1) - this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'AND':
+        this.regs.set(inst.dest, (this.regs.get(inst.src1) & this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'OR':
+        this.regs.set(inst.dest, (this.regs.get(inst.src1) | this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'XOR':
+        this.regs.set(inst.dest, (this.regs.get(inst.src1) ^ this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'NEG':
+        this.regs.set(inst.dest, -this.regs.get(inst.src) >>> 0);
+        break;
+      case 'ABS':
+        this.regs.set(inst.dest, Math.abs(this.regs.get(inst.src) | 0) >>> 0);
+        break;
+      case 'SLL': {
+        const shiftAmt = (32 - this.sar) & 0x3f; // always this formula - see the `sar` field's comment
+        const value = this.regs.get(inst.src);
+        this.regs.set(inst.dest, shiftAmt >= 32 ? 0 : (value << shiftAmt) >>> 0);
+        break;
+      }
+      case 'SRL':
+        this.regs.set(inst.dest, this.regs.get(inst.src) >>> this.sar);
+        break;
+      case 'SRA':
+        this.regs.set(inst.dest, ((this.regs.get(inst.src) | 0) >> this.sar) >>> 0);
+        break;
+      case 'SRC': {
+        // Funnel shift: {src1:src2} as one 64-bit value, shifted right by SAR, low 32 bits kept.
+        const hi = BigInt(this.regs.get(inst.src1) >>> 0);
+        const lo = BigInt(this.regs.get(inst.src2) >>> 0);
+        const combined = (hi << 32n) | lo;
+        this.regs.set(inst.dest, Number((combined >> BigInt(this.sar)) & 0xffffffffn) >>> 0);
+        break;
+      }
+      case 'SLLI':
+        this.regs.set(inst.dest, (this.regs.get(inst.src) << inst.shift) >>> 0);
+        break;
+      case 'SRAI':
+        this.regs.set(inst.dest, ((this.regs.get(inst.src) | 0) >> inst.shift) >>> 0);
+        break;
+      case 'SRLI':
+        this.regs.set(inst.dest, this.regs.get(inst.src) >>> inst.shift);
+        break;
+      case 'SSR':
+        this.sar = this.regs.get(inst.src) & 0x1f;
+        break;
+      case 'SSL':
+        this.sar = (32 - (this.regs.get(inst.src) & 0x1f)) & 0x3f;
+        break;
+      case 'SSAI':
+        this.sar = inst.shift & 0x1f;
         break;
       case 'ADDI':
         this.regs.set(inst.dest, (this.regs.get(inst.src) + inst.imm) >>> 0);

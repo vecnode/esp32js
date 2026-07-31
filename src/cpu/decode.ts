@@ -11,8 +11,9 @@
  * between decode-time `xtensa_operand_decode` and `xtensa_operand_undo_reloc`.
  *
  * Covers both instruction widths:
- *   - 24-bit ("wide"): ADD, SUB, MOVI, L32I, S32I, L32R, L32E, S32E, J, BEQ,
- *     BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU.
+ *   - 24-bit ("wide"): ADD, SUB, AND, OR, XOR, NEG, ABS, MOVI, L32I, S32I,
+ *     L32R, L32E, S32E, J, BEQ, BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET,
+ *     RETW, RFWO, RFWU, SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI.
  *   - 16-bit ("density"/".N"): ADD.N, ADDI.N, L32I.N, S32I.N, MOVI.N,
  *     BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N.
  * Anything else decodes to ILLEGAL - the opcode table matches translate.c's
@@ -53,9 +54,16 @@ export type Decoded =
   | { op: 'NOP' }
   | { op: 'ADD'; dest: number; src1: number; src2: number }
   | { op: 'SUB'; dest: number; src1: number; src2: number }
+  | { op: 'AND' | 'OR' | 'XOR'; dest: number; src1: number; src2: number }
+  | { op: 'NEG' | 'ABS'; dest: number; src: number }
   | { op: 'ADDI'; dest: number; src: number; imm: number }
   | { op: 'MOV'; dest: number; src: number }
   | { op: 'MOVI'; dest: number; imm: number }
+  | { op: 'SLL' | 'SRL' | 'SRA'; dest: number; src: number } // shift amount comes from SAR
+  | { op: 'SRC'; dest: number; src1: number; src2: number } // funnel shift, also from SAR
+  | { op: 'SLLI' | 'SRAI' | 'SRLI'; dest: number; src: number; shift: number }
+  | { op: 'SSR' | 'SSL'; src: number }
+  | { op: 'SSAI'; shift: number }
   | { op: 'L32I'; dest: number; base: number; offset: number }
   | { op: 'S32I'; src: number; base: number; offset: number }
   | { op: 'L32R'; dest: number; offset: number }
@@ -117,9 +125,17 @@ export function decode(word: number): Decoded {
   switch (op0) {
     case 0x0: // RRR arithmetic/"special" family
       if (op1 === 0x0) {
-        // ADD/SUB: op2 selects, r/s/t = dest/src1/src2 (Opcode_add/sub base 0x8/0xC << 20)
+        // ADD/SUB/AND/OR/XOR: op2 selects, r/s/t = dest/src1/src2
         if (op2 === 0x8) return { op: 'ADD', dest: r, src1: s, src2: t };
         if (op2 === 0xc) return { op: 'SUB', dest: r, src1: s, src2: t };
+        if (op2 === 0x1) return { op: 'AND', dest: r, src1: s, src2: t };
+        if (op2 === 0x2) return { op: 'OR', dest: r, src1: s, src2: t };
+        if (op2 === 0x3) return { op: 'XOR', dest: r, src1: s, src2: t };
+        if (op2 === 0x6) {
+          // NEG/ABS share r=dest, t=src; s is a fixed 0/1 selector, not a register.
+          if (s === 0x0) return { op: 'NEG', dest: r, src: t };
+          if (s === 0x1) return { op: 'ABS', dest: r, src: t };
+        }
         if (op2 === 0x0) {
           // RET/RETW: r=0, t=8/9 (m=2,n=0/1 per the generated decode tree)
           if (r === 0x0) {
@@ -131,6 +147,32 @@ export function decode(word: number): Decoded {
             if (s === 0x4) return { op: 'RFWO' };
             if (s === 0x5) return { op: 'RFWU' };
           }
+        }
+        if (op2 === 0x4) {
+          // SSR/SSL: r=0/1 selects, src register = s. SSAI: r=4 (fixed), shift
+          // is a composite of t's LSB (bit4) and s (bits[11:8]) - identity,
+          // no further transform (OperandSem_opnd_sem_bbi_decode).
+          if (r === 0x0) return { op: 'SSR', src: s };
+          if (r === 0x1) return { op: 'SSL', src: s };
+          if (r === 0x4) return { op: 'SSAI', shift: ((t & 0x1) << 4) | s };
+        }
+      }
+      if (op1 === 0x1) {
+        // Shifts: op2 selects. SLLI/SRAI's op2 LSB doubles as the shift
+        // amount's high bit (Field_sal/Field_sargt composite with bit[20],
+        // i.e. op2's own LSB) - see Opcode_slli/srai base encodings
+        // (0x010000/0x210000) and their Field_sal/Field_sargt getters.
+        if (op2 === 0xa) return { op: 'SLL', dest: r, src: s };
+        if (op2 === 0x9) return { op: 'SRL', dest: r, src: t };
+        if (op2 === 0xb) return { op: 'SRA', dest: r, src: t };
+        if (op2 === 0x8) return { op: 'SRC', dest: r, src1: s, src2: t };
+        if (op2 === 0x4) return { op: 'SRLI', dest: r, src: t, shift: s };
+        if (op2 === 0x0 || op2 === 0x1) {
+          const salRaw = ((op2 & 0x1) << 4) | t;
+          return { op: 'SLLI', dest: r, src: s, shift: (0x20 - salRaw) & 0x1f };
+        }
+        if (op2 === 0x2 || op2 === 0x3) {
+          return { op: 'SRAI', dest: r, src: t, shift: ((op2 & 0x1) << 4) | s };
         }
       }
       if (op1 === 0x9) {
