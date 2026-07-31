@@ -4,6 +4,7 @@ import { RegisterFile } from '../../src/cpu/registers.js';
 import { SystemBus } from '../../src/soc/bus.js';
 import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE } from '../../src/soc/memmap.js';
 import { UART_REG } from '../../src/peripherals/uart.js';
+import { GPIO_REG } from '../../src/peripherals/gpio.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -155,6 +156,58 @@ describe('SystemBus', () => {
       cpu.step(); // S32I -> UART_FIFO
 
       expect(output).toEqual([0x68, 0x69]); // "hi"
+    });
+  });
+
+  describe('GPIO dispatch', () => {
+    it('routes a 32-bit write/read to GPIO_OUT to the Gpio peripheral', () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.gpio + GPIO_REG.OUT, 0xdeadbeef);
+      expect(bus.read32(PERIPHERAL_BASE.gpio + GPIO_REG.OUT)).toBe(0xdeadbeef >>> 0);
+    });
+
+    it('does not collide with UART0 - the two peripherals stay isolated', () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.gpio + GPIO_REG.OUT, 0xffffffff);
+      expect(bus.read32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0)).toBe(0);
+    });
+
+    it('runs a real "blink" program: S32I toggles a GPIO pin observed via bus.gpio.getPin', () => {
+      const bus = new SystemBus();
+      const base = MEMORY_MAP.iram.base;
+      const MOVI = (dest: number, imm: number) => {
+        const raw12 = imm & 0xfff;
+        const s = (raw12 >> 8) & 0xf;
+        const imm8 = raw12 & 0xff;
+        return (imm8 << 16) | (0xa << 12) | (s << 8) | (dest << 4) | 0x2;
+      };
+      const S32I = (src: number, base_: number, byteOffset: number) => (((byteOffset >> 2) & 0xff) << 16) | (0x6 << 12) | (base_ << 8) | (src << 4) | 0x2;
+      const writeInsn = (addr: number, word: number) => {
+        bus.writeByte(addr, word & 0xff);
+        bus.writeByte(addr + 1, (word >>> 8) & 0xff);
+        bus.writeByte(addr + 2, (word >>> 16) & 0xff);
+      };
+
+      const gpioEnableW1tsAddr = PERIPHERAL_BASE.gpio + GPIO_REG.ENABLE_W1TS;
+      const gpioOutW1tsAddr = PERIPHERAL_BASE.gpio + GPIO_REG.OUT_W1TS;
+      const gpioOutW1tcAddr = PERIPHERAL_BASE.gpio + GPIO_REG.OUT_W1TC;
+      const cpu = new Cpu(new RegisterFile(), bus, base);
+      // Addresses are far outside MOVI's 12-bit range, so set them directly.
+      cpu.regs.set(1, gpioEnableW1tsAddr);
+      cpu.regs.set(2, gpioOutW1tsAddr);
+      cpu.regs.set(3, gpioOutW1tcAddr);
+      cpu.regs.set(4, 1 << 2); // pin 2 (a common onboard-LED pin)
+
+      writeInsn(base, S32I(4, 1, 0)); // enable pin 2 as output
+      writeInsn(base + 3, S32I(4, 2, 0)); // drive it high
+      writeInsn(base + 6, S32I(4, 3, 0)); // drive it low
+
+      cpu.step(); // enable
+      cpu.step(); // set high
+      expect(bus.gpio.getPin(2)).toBe(1);
+
+      cpu.step(); // set low
+      expect(bus.gpio.getPin(2)).toBe(0);
     });
   });
 });

@@ -35,7 +35,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` | single-precision only (`XCHAL_HAVE_DFP=0`) |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
-| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` | + IO_MUX (`hw/esp32/esp32_iomux.c`) for pin function select |
+| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | + IO_MUX (`hw/esp32/esp32_iomux.c`) for pin function select - not started |
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` | TIMG0/TIMG1, each with a watchdog |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
@@ -272,7 +272,10 @@ access, so this was never going to surface as a runtime bug, but it would
 have been a landmine for exactly the kind of side-effecting peripheral
 register this project is about to add more of - `write32`/`read32` route
 to peripherals *before* falling into the generic memory-region byte
-composition, not after, specifically to avoid it.
+composition, not after, specifically to avoid it. `SystemBus` now
+generalizes this into a small peripheral-slot table (base/size/device)
+rather than hardcoding a single UART special case, so adding the next
+peripheral (GPIO, below) was a data addition, not new dispatch logic.
 
 Not implemented for UART0, and why: RX (`UART_FIFO` always reads back
 0xEE, matching the reference's own "FIFO empty" case, since there's no
@@ -280,6 +283,29 @@ receive path yet); interrupt generation (`UART_INT_RAW`/`ST` would need
 `esp32_uart_update_irq` and a wired interrupt matrix, which is its own
 `peripherals/intmatrix.ts` - not started); baud-rate timing (`UART_CLKDIV`
 is stored but nothing paces against it, since this interpreter has no
-real-time clock to pace against yet). UART1/UART2 and every other
-peripheral in `PERIPHERAL_BASE` (GPIO/IO_MUX, TIMG0/1, SAR ADC,
-interrupt matrix) remain fully open.
+real-time clock to pace against yet). UART1/UART2 remain fully open.
+
+`peripherals/gpio.ts`'s `Gpio` (digital I/O only) is the second live
+peripheral, from `include/hw/esp32/esp32_gpio.h`/`hw/esp32/esp32_gpio.c`.
+GPIO_OUT/OUT_W1TS/OUT_W1TC, GPIO_ENABLE/ENABLE_W1TS/ENABLE_W1TC, GPIO_IN,
+GPIO_IN1, and GPIO_STRAP are implemented, including a reference detail
+worth calling out rather than "fixing": this fork has no simulated external
+circuit by default, so driving a pin configured as output loops straight
+back into GPIO_IN/IN1 (`esp32_gpio_write`'s diff-check against the old
+out/enable values) - reading back a pin you just drove returns what you
+drove, which happens to be exactly this project's situation too, so it's
+preserved as-is. `setPin`/`getPin` expose the reference's `set_gpio`
+external-input callback for tests/embedders to drive a pin from outside the
+chip (a button, etc.) without going through the MMIO path.
+`test/soc/bus.test.ts` includes a "blink" test: `S32I` instructions enable
+a pin as output and toggle it high/low, observed via `bus.gpio.getPin()`.
+
+Not implemented for GPIO, and why: GPIO_STATUS and per-pin edge/level
+interrupt generation (`gpio_pin[]`'s int_type field, GPIO_PCPU_INT/
+ACPU_INT) - meaningless without a wired interrupt matrix
+(`peripherals/intmatrix.ts`, not started); the IO_MUX-driven signal routing
+matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a GPIO
+to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O -
+out of scope until IO_MUX itself exists. Every other peripheral in
+`PERIPHERAL_BASE` (TIMG0/1, SAR ADC, interrupt matrix, IO_MUX) remains
+fully open.
