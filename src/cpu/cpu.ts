@@ -59,6 +59,12 @@
  * vector slots instead, with no EXCCAUSE involved, exactly as
  * `HELPER(window_check)`/`HELPER(test_underflow_retw)` do. VECBASE defaults
  * to its hardware reset value, `XCHAL_VECBASE_RESET_VADDR` (0x40000000).
+ * `Cpu`'s own default `pc` (when the constructor's third argument is
+ * omitted) is `RESET_VECTOR`, `XCHAL_RESET_VECTOR_VADDR` (0x40000400) -
+ * where real ESP32 silicon's boot ROM actually lives, inside IROM. This
+ * project doesn't load or execute that ROM (Phase 3's boot sequence starts
+ * a `Cpu` directly with RAM/flash already populated), but a fresh `Cpu`
+ * still reflects the chip's real reset PC rather than an arbitrary 0.
  *
  * SAR (shift amount register, `this.sar`): SSR/SSAI store the amount
  * directly, SSL stores its 32's-complement - see the field's own doc
@@ -138,6 +144,9 @@ export type ExceptionCause =
 
 /** VECBASE's hardware reset value (XCHAL_VECBASE_RESET_VADDR, core-isa.h). */
 const VECBASE_RESET = 0x40000000;
+
+/** PC's hardware reset value (XCHAL_RESET_VECTOR_VADDR, core-isa.h) - inside IROM, where the real boot ROM lives. */
+export const RESET_VECTOR = 0x40000400;
 
 /** Vector offsets relative to VECBASE, from XCHAL_*_VECOFS in core-isa.h. */
 const VEC_WINDOW_OVERFLOW: Record<4 | 8 | 12, number> = { 4: 0x000, 8: 0x080, 12: 0x100 };
@@ -225,7 +234,7 @@ export class Cpu {
   /** EPS2-EPS6 (index by level) - the PsSnapshot saved on entry to a level-2..6 interrupt. */
   private readonly psByLevel = new Map<number, PsSnapshot>();
 
-  constructor(regs: RegisterFile, bus: Bus, pc = 0) {
+  constructor(regs: RegisterFile, bus: Bus, pc = RESET_VECTOR) {
     this.regs = regs;
     this.bus = bus;
     this.pc = pc >>> 0;

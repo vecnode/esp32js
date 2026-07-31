@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Cpu, type Bus } from '../../src/cpu/cpu.js';
+import { Cpu, RESET_VECTOR, type Bus } from '../../src/cpu/cpu.js';
 import { RegisterFile } from '../../src/cpu/registers.js';
 
 /** Flat byte-addressable RAM for CPU-level tests - not a real memory map. */
@@ -112,6 +112,12 @@ function makeCpu(): { cpu: Cpu; bus: TestBus } {
 }
 
 describe('Cpu fetch/execute', () => {
+  it('defaults pc to the real hardware reset vector (XCHAL_RESET_VECTOR_VADDR) when omitted', () => {
+    const cpu = new Cpu(new RegisterFile(), new TestBus());
+    expect(cpu.pc).toBe(RESET_VECTOR);
+    expect(RESET_VECTOR).toBe(0x40000400);
+  });
+
   it('runs MOVI + ADD and advances pc by 3 bytes per instruction', () => {
     const { cpu, bus } = makeCpu();
     bus.writeInsn(0, MOVI(2, 5));
