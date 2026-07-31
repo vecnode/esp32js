@@ -436,4 +436,45 @@ describe('decode', () => {
       expect(decode(wsr)).toEqual({ op: 'WSR', sr: 228, reg: 5 });
     });
   });
+
+  describe('FPU (single-precision) instructions', () => {
+    it('decodes ADD.S/SUB.S/MUL.S (op1=0xa, op2=0/1/2)', () => {
+      expect(decode(rrr(0x0, 0xa, 4, 1, 2))).toEqual({ op: 'ADD_S', dest: 4, src1: 1, src2: 2 });
+      expect(decode(rrr(0x1, 0xa, 4, 1, 2))).toEqual({ op: 'SUB_S', dest: 4, src1: 1, src2: 2 });
+      expect(decode(rrr(0x2, 0xa, 4, 1, 2))).toEqual({ op: 'MUL_S', dest: 4, src1: 1, src2: 2 });
+    });
+
+    it('decodes MOV.S/ABS.S/NEG.S (op1=0xa,op2=0xf, disambiguated by t)', () => {
+      expect(decode(rrr(0xf, 0xa, 3, 2, 0))).toEqual({ op: 'MOV_S', dest: 3, src: 2 });
+      expect(decode(rrr(0xf, 0xa, 3, 2, 1))).toEqual({ op: 'ABS_S', dest: 3, src: 2 });
+      expect(decode(rrr(0xf, 0xa, 3, 2, 6))).toEqual({ op: 'NEG_S', dest: 3, src: 2 });
+    });
+
+    it('decodes WFR/RFR (op1=0xa,op2=0xf,t=5/4)', () => {
+      expect(decode(rrr(0xf, 0xa, 3, 2, 5))).toEqual({ op: 'WFR', dest: 3, src: 2 });
+      expect(decode(rrr(0xf, 0xa, 3, 2, 4))).toEqual({ op: 'RFR', dest: 3, src: 2 });
+    });
+
+    it('decodes FLOAT.S/UFLOAT.S/TRUNC.S/UTRUNC.S (op1=0xa, op2=0xc/d/9/e), scale=t unsigned', () => {
+      expect(decode(rrr(0xc, 0xa, 2, 5, 9))).toEqual({ op: 'FLOAT_S', dest: 2, src: 5, scale: 9 });
+      expect(decode(rrr(0xd, 0xa, 2, 5, 9))).toEqual({ op: 'UFLOAT_S', dest: 2, src: 5, scale: 9 });
+      expect(decode(rrr(0x9, 0xa, 2, 5, 9))).toEqual({ op: 'TRUNC_S', dest: 2, src: 5, scale: 9 });
+      expect(decode(rrr(0xe, 0xa, 2, 5, 9))).toEqual({ op: 'UTRUNC_S', dest: 2, src: 5, scale: 9 });
+    });
+
+    it('decodes OEQ.S/OLT.S/OLE.S/UN.S (op1=0xb, op2=2/4/6/1), dest is a BR index', () => {
+      expect(decode(rrr(0x2, 0xb, 7, 1, 2))).toEqual({ op: 'OEQ_S', dest: 7, src1: 1, src2: 2 });
+      expect(decode(rrr(0x4, 0xb, 7, 1, 2))).toEqual({ op: 'OLT_S', dest: 7, src1: 1, src2: 2 });
+      expect(decode(rrr(0x6, 0xb, 7, 1, 2))).toEqual({ op: 'OLE_S', dest: 7, src1: 1, src2: 2 });
+      expect(decode(rrr(0x1, 0xb, 7, 1, 2))).toEqual({ op: 'UN_S', dest: 7, src1: 1, src2: 2 });
+    });
+
+    it('decodes BT/BF (op0=6,n=3,m=1; r selects BT/BF, s=bs, imm8=signed offset)', () => {
+      // word = imm8<<16 | r<<12 | s<<8 | t<<4 | op0; t=7 fixes n=3,m=1.
+      const bt = (10 << 16) | (1 << 12) | (3 << 8) | (7 << 4) | 0x6;
+      const bf = (10 << 16) | (0 << 12) | (3 << 8) | (7 << 4) | 0x6;
+      expect(decode(bt >>> 0)).toEqual({ op: 'BT', src: 3, offset: 10 });
+      expect(decode(bf >>> 0)).toEqual({ op: 'BF', src: 3, offset: 10 });
+    });
+  });
 });

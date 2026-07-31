@@ -14,8 +14,10 @@
  *   - 24-bit ("wide"): ADD, SUB, ADDI, AND, OR, XOR, NEG, ABS, NSA, NSAU,
  *     MULL, QUOU, QUOS, REMU, REMS, MOVI, L32I, S32I, L32R, L32E, S32E, J,
  *     BEQ, BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU,
- *     SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI, RSIL, RFI,
- *     RSR/WSR (PS and INTENABLE only).
+ *     SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI, RSIL, RFI, RFE,
+ *     RSR/WSR (PS and INTENABLE only), and the single-precision FPU subset
+ *     ADD.S, SUB.S, MUL.S, MOV.S, NEG.S, ABS.S, WFR, RFR, FLOAT.S, UFLOAT.S,
+ *     TRUNC.S, UTRUNC.S, OEQ.S, OLT.S, OLE.S, UN.S, BT, BF (see cpu/fpu.ts).
  *   - 16-bit ("density"/".N"): ADD.N, ADDI.N, L32I.N, S32I.N, MOVI.N,
  *     BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N.
  * Anything else decodes to ILLEGAL - the opcode table matches translate.c's
@@ -87,7 +89,13 @@ export type Decoded =
   | { op: 'RSIL'; dest: number; level: number }
   | { op: 'RFI'; level: number }
   | { op: 'RFE' }
-  | { op: 'RSR' | 'WSR'; sr: number; reg: number };
+  | { op: 'RSR' | 'WSR'; sr: number; reg: number }
+  | { op: 'ADD_S' | 'SUB_S' | 'MUL_S'; dest: number; src1: number; src2: number }
+  | { op: 'MOV_S' | 'NEG_S' | 'ABS_S'; dest: number; src: number }
+  | { op: 'WFR' | 'RFR'; dest: number; src: number }
+  | { op: 'FLOAT_S' | 'UFLOAT_S' | 'TRUNC_S' | 'UTRUNC_S'; dest: number; src: number; scale: number }
+  | { op: 'OEQ_S' | 'OLT_S' | 'OLE_S' | 'UN_S'; dest: number; src1: number; src2: number }
+  | { op: 'BT' | 'BF'; src: number; offset: number };
 
 /** Sign-extend the low `bits` bits of `value` to a 32-bit signed int. */
 function sext(value: number, bits: number): number {
@@ -218,6 +226,35 @@ export function decode(word: number): Decoded {
         if (op2 === 0x0) return { op: 'RSR', sr, reg: t };
         if (op2 === 0x1) return { op: 'WSR', sr, reg: t };
       }
+      if (op1 === 0xa) {
+        // FP1 (single-precision arithmetic/conversion) family: r/s/t are
+        // FR (float) or AR (int) registers depending on the opcode - see
+        // cpu/fpu.ts's doc comment for exactly which. op2=0xf's t field
+        // further disambiguates a "move/bit-move" cluster the same way
+        // op1=0x0's r/s fields disambiguate RET/RSIL/RFI/etc above.
+        if (op2 === 0x0) return { op: 'ADD_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x1) return { op: 'SUB_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x2) return { op: 'MUL_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x9) return { op: 'TRUNC_S', dest: r, src: s, scale: t };
+        if (op2 === 0xc) return { op: 'FLOAT_S', dest: r, src: s, scale: t };
+        if (op2 === 0xd) return { op: 'UFLOAT_S', dest: r, src: s, scale: t };
+        if (op2 === 0xe) return { op: 'UTRUNC_S', dest: r, src: s, scale: t };
+        if (op2 === 0xf) {
+          if (t === 0x0) return { op: 'MOV_S', dest: r, src: s };
+          if (t === 0x1) return { op: 'ABS_S', dest: r, src: s };
+          if (t === 0x4) return { op: 'RFR', dest: r, src: s };
+          if (t === 0x5) return { op: 'WFR', dest: r, src: s };
+          if (t === 0x6) return { op: 'NEG_S', dest: r, src: s };
+        }
+      }
+      if (op1 === 0xb) {
+        // FP2 (single-precision compare) family: dest is a BR (boolean
+        // register) index, src1/src2 are FR registers.
+        if (op2 === 0x1) return { op: 'UN_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x2) return { op: 'OEQ_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x4) return { op: 'OLT_S', dest: r, src1: s, src2: t };
+        if (op2 === 0x6) return { op: 'OLE_S', dest: r, src1: s, src2: t };
+      }
       break;
 
     case 0x1: { // L32R (RI16): imm16 = bits[23:8], always a negative word-aligned offset
@@ -252,6 +289,14 @@ export function decode(word: number): Decoded {
       if (n === 3 && m === 0) {
         // ENTRY: s = bits[11:8] (must be a0-a3 on real hardware), imm = bits[23:12] * 8
         return { op: 'ENTRY', s, imm: imm12 << 3 };
+      }
+      if (n === 3 && m === 1) {
+        // BT/BF (branch on a BR boolean register): s = bs (the BR index),
+        // r selects BT (1) vs BF (0), imm8 = signed displacement - same
+        // shape as the op0=0x7 BRI8 family, just living under op0=0x6's
+        // n=3,m=1 slot instead (Opcode_bt/bf_Slot_inst_encode in
+        // xtensa-modules.inc.c: base encoding 0x001076/0x000076).
+        return { op: r === 0x1 ? 'BT' : 'BF', src: s, offset: sext(imm8, 8) };
       }
       break;
 
