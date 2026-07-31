@@ -114,6 +114,7 @@ describe('Board pin/serial/ADC passthroughs', () => {
     const out: number[] = [];
     board.onSerialOut = (b) => out.push(b);
     board.bus.uart0.writeWord(0x00, 0x48); // UART_FIFO offset
+    board.bus.uart0.advance(1_000_000n); // let real TX pacing finish - see Uart0's doc comment
     expect(out).toEqual([0x48]);
 
     board.serialIn(0x69);
