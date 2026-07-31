@@ -40,8 +40,8 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
-| `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` | needed for reset/boot, not just deep-sleep |
-| `soc/dport.ts` | `hw/esp32/esp32_dport.c` | CPU control, cache config, PSRAM enable |
+| `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
+| `soc/dport.ts` | `hw/esp32/esp32_dport.c` — **done (APPCPU control + CPU_PER_CONF + cache-enable storage only)**, see Phase 3 status | CPU control, cache config, PSRAM enable - PSRAM/MMU/flash-encryption still open |
 
 (Every `hw/esp32/*` and `include/hw/esp32/*` path above was corrected from an
 earlier guess that used the wrong directory prefix, e.g. `hw/gpio/`,
@@ -273,18 +273,39 @@ hand-assembled program placed at IRAM's real base address, not just against
 Phase 2's CPU have been exercised together.
 
 Explicitly out of scope for `SystemBus` right now, and flagged rather than
-half-built: every peripheral block in `PERIPHERAL_BASE` besides UART0 isn't
-backed at all; DROM/IROM have no read-only enforcement; unmapped access
-reads as 0 / silently no-ops on write instead of raising
-LOAD_STORE_ERROR_CAUSE, because doing that properly needs an
+half-built (peripheral coverage below is current as of the boot-sequence
+work, not the original UART-only cut): DROM/IROM have no read-only
+enforcement; unmapped access reads as 0 / silently no-ops on write instead
+of raising LOAD_STORE_ERROR_CAUSE, because doing that properly needs an
 EXCVADDR-carrying fault channel from `Bus` back to `Cpu` (analogous to
 `HELPER(exception_cause_vaddr)` in `exc_helper.c`) that doesn't exist yet.
 
+The boot-sequence half of Phase 3 is now started too: `Cpu`'s own default
+`pc` (when no explicit value is passed to the constructor) is
+`RESET_VECTOR` = `0x40000400` (`XCHAL_RESET_VECTOR_VADDR`, core-isa.h) -
+real ESP32 silicon's actual reset PC, inside IROM where the boot ROM lives
+- rather than an arbitrary 0. `soc/rtc_cntl.ts`'s `RtcCntl` backs reset
+cause tracking (`RTC_CNTL_RESET_STATE`, matching real `esp_reset_reason()`)
+and the software reset triggers (`RTC_CNTL_OPTIONS0`'s SW_SYS_RESET/
+SW_PROCPU_RESET bits, matching `esp_restart()`), plus scratch/clock/stall
+registers as plain storage; `soc/dport.ts`'s `Dport` backs APPCPU control,
+CPU_PER_CONF, and cache-enable registers as plain storage (no second CPU,
+no real cache, so nothing acts on them yet - see each file's own doc
+comment for exactly what's real vs. inert storage). `test/soc/bus.test.ts`
+includes a real boot idiom end to end: read `RESET_STATE` (as
+`esp_reset_reason()` would), then trigger a software PROCPU reset via
+`S32I`, observed both through the register read-back and an `onReset`
+callback.
+
 Still open for Phase 3: actually loading a firmware image (`SystemBus`
 exposes `loadBytes()` for this, but nothing produces the bytes yet - no ELF
-parsing or ESP32 image-header handling) and the boot sequence itself
-(`soc/rtc_cntl.ts` for reset, `soc/dport.ts` for CPU/cache config) to get
-from power-on to a loaded image's entry point.
+parsing or ESP32 image-header handling); this project doesn't execute the
+real boot ROM or 2nd-stage bootloader (no such binary is loaded), so
+"boot" here means a `Cpu` that resets to the right PC with correctly-
+behaving RTC_CNTL/DPORT registers, not a full power-on-to-`app_main()`
+trace; the RTC watchdog (this fork's own RTC_CNTL doesn't model one
+either - see `rtc_cntl.ts`'s doc comment); a real second CPU core (all of
+DPORT's APPCPU_* registers are inert without one).
 
 Phase 4 (started): `peripherals/uart.ts`'s `Uart0` - TX only, wired into
 `soc/bus.ts` as the first live peripheral in the SoC's real address space
@@ -377,8 +398,10 @@ instance-agnostic and works for either, only TIMG0 is connected to
 the real 69-entry-per-CPU register array from `hw/xtensa/esp32_intc.c`
 (`esp32_intmatrix_read`/`_write`/`_irq_handler`), mapped at its real
 address (`PERIPHERAL_BASE.dport + 0x104`, i.e. `A_DPORT_PRO_MAC_INTR_MAP` -
-these registers really do live inside DPORT's own window, even though
-`soc/dport.ts` doesn't exist yet). `IntMatrix.attach(cpu)` wires its output
+these registers really do live inside DPORT's own window; `soc/dport.ts`
+now exists too, as a separate `SystemBus` peripheral slot covering only the
+lower part of that same address range - the two don't overlap).
+`IntMatrix.attach(cpu)` wires its output
 to a `Cpu` (a `SystemBus` doesn't otherwise hold a `Cpu` reference, so this
 is an explicit step the embedder takes once after constructing both).
 `setSourceLevel(source, level)` is `esp32_intmatrix_irq_handler`'s
