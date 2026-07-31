@@ -1,7 +1,0 @@
-# physicalsim: every other architecture's Kconfig removed alongside its
-# target/<arch> source (see target/meson.build's own comment) - only
-# xtensa remains.
-source xtensa/Kconfig
-
-config TARGET_BIG_ENDIAN
-    bool

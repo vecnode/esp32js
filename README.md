@@ -1,39 +1,28 @@
-# qemu-esp32
+# esp32js
 
-A trimmed QEMU checkout that builds exactly one thing:
-`qemu-system-xtensa.exe`, running exactly one machine —
-`-machine esp32` — for
-[physicalsim](https://github.com/vecnode/physicalsim)'s ESP32 QEMU
-adapter (`src/esp32_qemu_adapter.cpp`).
+An ESP32 (Xtensa LX6) CPU and peripheral interpreter written in TypeScript, for running in the browser or Node — in the spirit of [avr8js](https://github.com/wokwi/avr8js), for ESP32 instead of AVR8.
 
-This is not a general-purpose QEMU build. Every guest CPU architecture
-except xtensa, every xtensa board except `esp32`, every firmware/BIOS
-blob except the ESP32 ROM images, and QEMU's own test suite/docs/UI
-translations have all been removed — see the commit history for exactly
-what and why. WiFi, ESP32-C3, ESP32-S3, and dynamic-library builds (all
-present in earlier history this repo was originally forked from) are
-gone; physicalsim's adapter never used any of them. This fork used to
-also carry a second, near-identical `-machine esp32-picsimlab` for
-PICSimLab's own in-process integration (PICSimLab links libqemu directly
-and drives it via C callbacks) - that's gone too, folded into the one
-`esp32` machine after porting the handful of pieces physicalsim actually
-depended on (two HMP monitor commands physicalsim's adapter calls over
-the GDB RSP connection - see `hw/xtensa/esp32.c`'s own comment).
+## Scope
 
-## What this builds
+This is a from-scratch interpreter, not a port of QEMU. It targets exactly what a firmware simulator needs to run real ESP-IDF binaries against simulated GPIO/ADC/timer/UART peripherals:
+
+- Xtensa LX6 core: ALU, load/store, branches, windowed register calls (`CALL4/8/12`, `ENTRY`/`RETW`), XEA2 exceptions and interrupts, single-precision FP
+- Peripherals: GPIO (+ GPIO matrix), TIMG timers, UART, SAR ADC, interrupt matrix
+
+**Explicitly out of scope:** WiFi/Bluetooth MAC/radio emulation, cache/MMU (ESP32 has no page-table MMU — it's identity-mapped, so none is needed), crypto accelerators (AES/RSA/SHA/HMAC), FLIX/HiFi/DSP instruction extensions. None of these are present in the target hardware config or are needed to run and drive firmware logic.
+
+## Status
+
+Early scaffold. The windowed register file (`src/cpu/registers.ts`) is the first piece, since register windowing is the one Xtensa-specific mechanic with no AVR equivalent and everything else in the core loop depends on it.
+
+## Development
 
 ```
-./configure --target-list=xtensa-softmmu --disable-werror --disable-docs --disable-tools --disable-fdt --disable-containers
-ninja -C build qemu-system-xtensa.exe
+npm install
+npm test
+npm run build
 ```
 
-See `.github/workflows/release.yml` for the exact toolchain (MSYS2
-mingw64) and packaging steps used to build and publish the release
-`physicalsim`'s own `CMakeLists.txt` (`BUNDLE_QEMU_XTENSA`) downloads.
+## License
 
-## Releases
-
-Every push to `main` rebuilds and republishes `qemu-esp32-win64.zip` to
-the `qemu-esp32-win64-v1` release tag automatically — physicalsim's
-build always resolves to whatever this repo's `main` most recently
-produced.
+MIT — see [LICENSE](LICENSE).
