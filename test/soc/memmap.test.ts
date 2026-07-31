@@ -46,6 +46,7 @@ describe('PERIPHERAL_BASE matches include/hw/misc/esp32_reg.h', () => {
     ['spi0', 0x3ff43000],
     ['gpio', 0x3ff44000],
     ['rtcCntl', 0x3ff48000],
+    ['sens', 0x3ff48800],
     ['ioMux', 0x3ff49000],
     ['i2s0', 0x3ff4f000],
     ['uart1', 0x3ff50000],
