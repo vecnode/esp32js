@@ -38,7 +38,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O + per-pin edge/level interrupts)**, see Phase 4/5 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
 | `peripherals/iomux.ts` | `hw/esp32/esp32_iomux.c` — **done (per-pin register storage)**, see Phase 4 status | pins 28-31 undocumented in the reference itself, omitted here too; no GPIO function-select side effects |
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (T0/T1 counters + alarms, full WDT stage pipeline)**, see Phase 4/5 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far; polled `advance(cycles)`, not real-time-paced like the reference |
-| `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX + real RX FIFO + interrupts, no TX pacing - the reference has none either)**, see Phase 4/5 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
+| `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (real RX FIFO + interrupts + real TX pacing, deliberately beyond the reference's own incomplete TX stub)**, see Phase 4/5 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c` — **done (ADC1/ADC2 channel select + injected value read)**, see Phase 4 status | touch sensor channels and ADC_ATTEN/width config not modeled |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` — **done (reset cause + scratch/clock/stall registers, no RTC WDT or real-time clock)**, see Phase 3 status | needed for reset/boot, not just deep-sleep |
@@ -694,3 +694,28 @@ nanoseconds now too, via the reference's own real formula
 80MHz-APB path only - `REF_TICK` isn't modeled) - no more indirect
 "cycles via clkdiv" conversion trick, since real elapsed time is now
 available directly from `Cpu`.
+
+`Uart0`'s TX side is genuinely paced now, closing the last of the four
+gaps identified for physicalsim usability. This is a deliberate departure
+from the reference, called out explicitly since this project otherwise
+matches it exactly, quirks included: `uart_transmit` drains the entire TX
+FIFO synchronously in one call with no timing delay at all, and the
+reference's own source still carries commented-out retry logic for a real
+async write path that was evidently never finished. Rather than replicate
+that known-incomplete stub, `Uart0` now queues written bytes (capped at
+the real 128-byte `UART_FIFO_LENGTH`, dropped past that) and drains them
+over real time via `advance(nanos)`, using ordinary, universally
+documented serial-frame timing - not an Xtensa- or ESP32-specific
+invention: `frameNanos()` reads `UART_CONF0`'s real `BIT_NUM`/
+`STOP_BIT_NUM`/`PARITY_EN` fields (`1 start bit + data + parity + stop`
+bits, over the real baud rate) - `CONF0` now also gets its real reset
+default (`esp32_uart_reset_hold`'s `STOP_BIT_NUM=1`, `BIT_NUM=3`, i.e. 8
+data bits), previously untracked since nothing read it before TX pacing
+existed. `TXFIFO_EMPTY`/`TX_DONE`/`UART_STATUS`'s `TXFIFO_CNT` all reflect
+this real queue depth and in-flight state now, instead of being hardcoded
+"always empty/never done" to match the reference's own stub; `onTx` fires
+once a byte's transmit time has actually elapsed, not synchronously at
+write time. `advance()`'s TX-draining loop handles more than one byte
+finishing within a single call (a caller batching several `Cpu.step()`s
+worth of elapsed time before calling `tick()` is a legitimate pattern,
+unlike TIMG/WDT's "at most once per `advance()` call" simplification).

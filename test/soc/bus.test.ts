@@ -104,6 +104,7 @@ describe('SystemBus', () => {
       bus.uart0.onTx = (b) => bytes.push(b);
 
       bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.FIFO, 0x48);
+      bus.uart0.advance(1_000_000n); // let real TX pacing finish - see Uart0's doc comment
       expect(bytes).toEqual([0x48]);
     });
 
@@ -166,6 +167,7 @@ describe('SystemBus', () => {
       cpu.step(); // S32I -> UART_FIFO
       cpu.step(); // MOVI a3, 'i'
       cpu.step(); // S32I -> UART_FIFO
+      bus.uart0.advance(1_000_000n); // let real TX pacing finish - see Uart0's doc comment
 
       expect(output).toEqual([0x68, 0x69]); // "hi"
     });
@@ -198,7 +200,9 @@ describe('SystemBus', () => {
     it('does not collide with UART0 - the two peripherals stay isolated', () => {
       const bus = new SystemBus();
       bus.write32(PERIPHERAL_BASE.gpio + GPIO_REG.OUT, 0xffffffff);
-      expect(bus.read32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0)).toBe(0);
+      // CONF0's real reset default (esp32_uart_reset_hold): TICK_REF_ALWAYS_ON=1, STOP_BIT_NUM=1, BIT_NUM=3.
+      const conf0Reset = (1 << 27) | (1 << 4) | (3 << 2);
+      expect(bus.read32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0)).toBe(conf0Reset);
     });
 
     it('runs a real "blink" program: S32I toggles a GPIO pin observed via bus.gpio.getPin', () => {

@@ -1,5 +1,5 @@
 /**
- * ESP32 UART peripheral - TX (side-effecting write) plus a real RX FIFO
+ * ESP32 UART peripheral - a real, baud-paced TX FIFO plus a real RX FIFO
  * (external byte injection) and real interrupt generation.
  *
  * Register offsets, field layouts, and read/write semantics are taken from
@@ -8,14 +8,22 @@
  * `hw/esp32/esp32_uart.c`'s `uart_read`/`uart_write`/`esp32_uart_update_irq`/
  * `uart_receive`/`esp32_uart_set_rx_timeout` for behavior.
  *
- * TX pacing is explicitly **not** implemented, and this is a finding, not a
- * gap: the reference's own `uart_transmit` drains the entire TX FIFO
- * synchronously in one call, writing to the real chardev backend with no
- * timing delay at all, before `esp32_uart_update_irq` even runs - so
- * `TXFIFO_EMPTY_raw` and `TX_DONE_raw` (`tx_fifo_used != 0`) are, in the
- * reference itself, essentially always "empty"/"done" by the time anything
- * observes them. There is no real TX timing behavior to port here; `onTx`
- * fires synchronously for exactly the same reason.
+ * TX pacing is a deliberate departure from the reference, not an oversight -
+ * worth being explicit about since this project otherwise matches the
+ * reference's behavior exactly, quirks included. `uart_transmit` drains the
+ * entire TX FIFO synchronously in one call, writing to the real chardev
+ * backend with no timing delay at all - the reference's own source still
+ * carries commented-out retry logic for a real async, non-blocking write
+ * path that was evidently never finished. Rather than replicate that
+ * known-incomplete stub, `advance(nanos)` (once `Cpu`/`SystemBus` started
+ * providing real elapsed time - see `cpu/cpu.ts`'s `cpuFreqHz`) drains the
+ * TX FIFO byte by byte over real time instead, using ordinary, universally
+ * documented serial-frame timing (`frameNanos`, below) - not an Xtensa- or
+ * ESP32-specific invention. `TXFIFO_EMPTY`/`TX_DONE`/`UART_STATUS`'s
+ * `TXFIFO_CNT` now reflect this real queue depth and in-flight state,
+ * rather than being hardcoded "always empty/never done" to match the
+ * reference's own stub. `onTx` fires once a byte's transmit time has
+ * actually elapsed, not synchronously at write time.
  *
  * RX is real now: `pushRx(byte)` (the external-stimulus entry point, same
  * shape as `Gpio.setPin`) feeds a FIFO (capped at the real `UART_FIFO_
@@ -30,9 +38,10 @@
  *
  * `esp32_uart_update_irq`'s interrupt condition, ported directly:
  * `RXFIFO_FULL` (RX FIFO depth >= `UART_CONF1`'s `RXFIFO_FULL_THRD`),
- * `TXFIFO_EMPTY` (always true here, see above), `TX_DONE` (always false,
- * see above), and `RXFIFO_TOUT` (an idle-since-last-RX-event timeout - see
- * below). All four combine into `UART_INT_RAW`, `& UART_INT_ENA` into
+ * `TXFIFO_EMPTY` (TX FIFO depth <= `TXFIFO_EMPTY_THRD`), `TX_DONE` (TX FIFO
+ * depth != 0 - real now, see above), and `RXFIFO_TOUT` (an
+ * idle-since-last-RX-event timeout - see below). All four combine into
+ * `UART_INT_RAW`, `& UART_INT_ENA` into
  * `UART_INT_ST`, and the *combined* result (not per-bit) is this class's
  * `onInterruptChange` - matching the reference's single `qemu_irq irq`
  * output. A genuinely surprising reference quirk preserved rather than
@@ -60,6 +69,16 @@
  * by a `UART_CONF1` write - real hardware doesn't require the FIFO to
  * actually hold unread data for this timeout to eventually fire, a quirk
  * preserved here too.
+ *
+ * `frameNanos` (TX pacing's per-byte transmit time) reads `UART_CONF0`'s
+ * real fields: `BIT_NUM` (data bits, 0-3 -> 5-8), `STOP_BIT_NUM` (1=1 stop
+ * bit, 2=1.5, 3=2 - 1.5 is approximated as 1 here, a minor simplification
+ * since fractional-bit timing isn't meaningful at this level of accuracy),
+ * and `PARITY_EN` (an extra bit if set) - `1 start bit + data + parity +
+ * stop` bits, divided by the real baud rate (`baudRate()`, above). Reset
+ * defaults for these fields now match the reference's own
+ * `esp32_uart_reset_hold` (`STOP_BIT_NUM=1`, `BIT_NUM=3` i.e. 8 data bits) -
+ * previously untracked, since nothing read them before TX pacing existed.
  */
 
 export const UART_REG = {
@@ -96,9 +115,16 @@ const TX_DONE_BIT = 1 << 14;
 const APB_FREQ_HZ = 80_000_000n;
 const NANOS_PER_SECOND = 1_000_000_000n;
 
+/** UART_CONF0 reset default (esp32_uart_reset_hold): TICK_REF_ALWAYS_ON=1, STOP_BIT_NUM=1, BIT_NUM=3 (8 data bits). */
+const CONF0_RESET = (1 << 27) | (1 << 4) | (3 << 2);
+
 export class Uart0 {
   private readonly regs = new Map<number, number>();
   private readonly rxFifo: number[] = [];
+  /** TX FIFO - index 0 is the byte currently "in flight" (counting down `txBusyNanos`) once transmission has started. */
+  private readonly txFifo: number[] = [];
+  /** Real nanoseconds remaining to transmit `txFifo[0]`, or null if nothing is currently transmitting - see class doc comment. */
+  private txBusyNanos: bigint | null = null;
 
   private intEna = 0;
   private intRaw = 0;
@@ -115,10 +141,14 @@ export class Uart0 {
   private clkdivInt = 0x2b6; // reset default (esp32_uart_reset_hold)
   private clkdivFrag = 0;
 
-  /** Called with each byte written to UART_FIFO - the "transmitted" byte. */
+  /** Called once a byte written to UART_FIFO actually finishes transmitting - see class doc comment on TX pacing. */
   onTx?: (byte: number) => void;
   /** Fires when the combined RXFIFO_FULL/TXFIFO_EMPTY/TX_DONE/RXFIFO_TOUT `& INT_ENA` condition changes. */
   onInterruptChange?: (active: boolean) => void;
+
+  constructor() {
+    this.regs.set(UART_REG.CONF0, CONF0_RESET);
+  }
 
   /** Feed an externally-received byte into the RX FIFO (uart_receive) - dropped if the FIFO is already full. */
   pushRx(byte: number): void {
@@ -127,13 +157,30 @@ export class Uart0 {
     this.updateIrq();
   }
 
-  /** Advance the RX idle-timeout countdown by `nanos` real elapsed nanoseconds - see class doc comment. */
+  /** Advance the RX idle-timeout countdown and TX pacing by `nanos` real elapsed nanoseconds - see class doc comment. */
   advance(nanos: bigint): void {
-    if (this.rxTimeoutNanos === null) return;
-    this.rxTimeoutNanos -= nanos;
-    if (this.rxTimeoutNanos > 0n) return;
-    this.rxTimeoutNanos = null;
-    this.rxfifoTout = true;
+    if (this.rxTimeoutNanos !== null) {
+      this.rxTimeoutNanos -= nanos;
+      if (this.rxTimeoutNanos <= 0n) {
+        this.rxTimeoutNanos = null;
+        this.rxfifoTout = true;
+      }
+    }
+
+    if (this.txBusyNanos !== null) {
+      this.txBusyNanos -= nanos;
+      // A loop, not a single check: one `advance()` call can span more than
+      // one byte's transmit time (e.g. a caller batching several Cpu.step()s
+      // worth of elapsed time into one call), so every byte that has
+      // genuinely finished by now must fire onTx, not just the first.
+      while (this.txBusyNanos !== null && this.txBusyNanos <= 0n) {
+        const overshoot: bigint = -this.txBusyNanos;
+        const byte = this.txFifo.shift();
+        if (byte !== undefined) this.onTx?.(byte);
+        this.txBusyNanos = this.txFifo.length > 0 ? this.frameNanos() - overshoot : null;
+      }
+    }
+
     this.updateIrq();
   }
 
@@ -142,6 +189,17 @@ export class Uart0 {
     const clkdivX16 = BigInt(this.clkdivInt) * 16n + BigInt(this.clkdivFrag);
     if (clkdivX16 === 0n) return 115_200n; // reset default, matches the reference's own clkdiv===0 fallback
     return (APB_FREQ_HZ * 16n) / clkdivX16;
+  }
+
+  /** Real transmit time for one byte, from UART_CONF0's framing fields and the real baud rate - see class doc comment. */
+  private frameNanos(): bigint {
+    const conf0 = this.regs.get(UART_REG.CONF0) ?? 0;
+    const dataBits = [5, 6, 7, 8][(conf0 >>> 2) & 0x3]!;
+    const stopBitNum = (conf0 >>> 4) & 0x3;
+    const stopBits = stopBitNum === 3 ? 2 : 1; // 1.5 (raw=2) approximated as 1 - see class doc comment
+    const parityBits = (conf0 & (1 << 1)) !== 0 ? 1 : 0;
+    const bitsPerFrame = BigInt(1 + dataBits + parityBits + stopBits); // 1 start bit + frame
+    return (bitsPerFrame * NANOS_PER_SECOND) / this.baudRate();
   }
 
   private armRxTimeout(): void {
@@ -161,10 +219,11 @@ export class Uart0 {
   }
 
   private updateIrq(): void {
-    let raw = TXFIFO_EMPTY_BIT; // always empty/done - see class doc comment
+    let raw = 0;
     if (this.rxFifo.length >= this.rxFullThreshold) raw |= RXFIFO_FULL_BIT;
+    if (this.txFifo.length <= this.txEmptyThreshold) raw |= TXFIFO_EMPTY_BIT;
+    if (this.txFifo.length !== 0) raw |= TX_DONE_BIT;
     if (this.rxfifoTout) raw |= RXFIFO_TOUT_BIT;
-    // TX_DONE_BIT is never set - tx_fifo_used is always 0 by the time this runs, see class doc comment.
     this.intRaw = raw;
     this.setActive((this.intRaw & this.intEna) !== 0);
   }
@@ -197,8 +256,8 @@ export class Uart0 {
       case UART_REG.INT_ENA:
         return this.intEna >>> 0;
       case UART_REG.STATUS:
-        // RXFIFO_CNT (bits[7:0]) = real depth; TXFIFO_CNT (bits[23:16]) always 0 - see class doc comment.
-        return this.rxFifo.length & 0xff;
+        // RXFIFO_CNT (bits[7:0]) and TXFIFO_CNT (bits[23:16]) both reflect real depth now.
+        return (this.rxFifo.length & 0xff) | ((this.txFifo.length & 0xff) << 16);
       case UART_REG.LOWPULSE:
       case UART_REG.HIGHPULSE:
         return 337; // fixed placeholder value in the reference (APB-frequency-dependent, marked FIXME there too)
@@ -218,7 +277,11 @@ export class Uart0 {
   writeWord(offset: number, value: number): void {
     switch (offset) {
       case UART_REG.FIFO:
-        this.onTx?.(value & 0xff);
+        // fifo8_push's own free-space check - dropped (not queued) once the 128-byte TX FIFO is full.
+        if (this.txFifo.length < FIFO_LENGTH) {
+          this.txFifo.push(value & 0xff);
+          if (this.txBusyNanos === null) this.txBusyNanos = this.frameNanos(); // idle -> this byte starts transmitting now
+        }
         break;
       case UART_REG.INT_ENA:
         this.intEna = value >>> 0;
