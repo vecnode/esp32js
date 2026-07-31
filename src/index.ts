@@ -9,5 +9,6 @@ export { SystemBus } from './soc/bus.js';
 export { Uart0, UART_REG, UART_WINDOW_SIZE } from './peripherals/uart.js';
 export { Gpio, GPIO_REG, GPIO_WINDOW_SIZE } from './peripherals/gpio.js';
 export { Timg, TIMG_REG, TIMG_WINDOW_SIZE } from './peripherals/timer.js';
+export { IntMatrix, INTMATRIX_NUM_SOURCES, INTMATRIX_WINDOW_SIZE, INTMATRIX_SOURCE } from './peripherals/intmatrix.js';
 export { ESP32_CAM, ESP32_DEVKIT_C_V4, ESP32_DEVKIT_V1 } from './boards/index.js';
 export type { BoardDefinition, PinAssignment, PinRole } from './boards/index.js';

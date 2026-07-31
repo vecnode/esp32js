@@ -6,6 +6,7 @@ import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE } from '../../src/so
 import { UART_REG } from '../../src/peripherals/uart.js';
 import { GPIO_REG } from '../../src/peripherals/gpio.js';
 import { TIMG_REG } from '../../src/peripherals/timer.js';
+import { INTMATRIX_SOURCE } from '../../src/peripherals/intmatrix.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -260,6 +261,35 @@ describe('SystemBus', () => {
 
       expect(bus.timg0.readWord(TIMG_REG.WDTCONFIG0)).toBe(0);
       expect(bus.timg0.readWord(TIMG_REG.WDTPROTECT)).toBe(0);
+    });
+  });
+
+  describe('interrupt matrix dispatch', () => {
+    const intmatrixBase = PERIPHERAL_BASE.dport + 0x104; // A_DPORT_PRO_MAC_INTR_MAP
+
+    it('routes a 32-bit write/read to the UART0 source map register', () => {
+      const bus = new SystemBus();
+      const addr = intmatrixBase + INTMATRIX_SOURCE.UART0 * 4;
+      bus.write32(addr, 5);
+      expect(bus.read32(addr)).toBe(5);
+    });
+
+    it('resets every source to 6, matching esp32_intmatrix_reset_hold', () => {
+      const bus = new SystemBus();
+      expect(bus.read32(intmatrixBase)).toBe(6);
+    });
+
+    it('drives a real interrupt end to end: GPIO -> intmatrix -> Cpu, once attached', () => {
+      const bus = new SystemBus();
+      const cpu = new Cpu(new RegisterFile(), bus, MEMORY_MAP.iram.base);
+      bus.intmatrix.attach(cpu);
+
+      cpu.intenable = 1 << 3; // route GPIO's source to CPU line 3 (level 1)
+      bus.write32(intmatrixBase + INTMATRIX_SOURCE.GPIO * 4, 3);
+      bus.intmatrix.setSourceLevel(INTMATRIX_SOURCE.GPIO, 1);
+
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
     });
   });
 });

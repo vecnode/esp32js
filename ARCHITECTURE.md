@@ -31,7 +31,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 |---|---|---|
 | `cpu/registers.ts` | `target/xtensa/win_helper.c` | done — windowed register file |
 | `cpu/decode.ts`, `cpu/cpu.ts` | `target/xtensa/translate.c` (7672 lines) | opcode decode + ALU/load-store/branch semantics |
-| `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | PS register, vector table, interrupt levels |
+| `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | **mostly done**, but living directly on `Cpu` rather than a separate module - see Phase 2 status. Interrupt levels 1-6 dispatch, RSIL/RFI/WSR.PS/RSR.PS/WSR.INTENABLE/RSR.INTENABLE all real; still open: NMI (level 7), interrupt *type* beyond level-triggered, RFE (return from a level-1 exception/interrupt) |
 | `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` | single-precision only (`XCHAL_HAVE_DFP=0`) |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
@@ -39,7 +39,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (registers + WDT unlock/feed, no free-running clock)**, see Phase 4 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c`, `esp32_ana.c` | SAR ADC1/ADC2 |
-| `peripherals/intmatrix.ts` | `hw/xtensa/esp32.c` interrupt source enum | peripheral IRQ → CPU interrupt line |
+| `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
 | `soc/rtc_cntl.ts` | `hw/esp32/esp32_rtc_cntl.c` | needed for reset/boot, not just deep-sleep |
 | `soc/dport.ts` | `hw/esp32/esp32_dport.c` | CPU control, cache config, PSRAM enable |
 
@@ -211,23 +211,58 @@ of the real ROM spill routine - that exact register layout is an ABI/
 firmware convention with no reference in this QEMU fork's source) restores
 state and successfully retries the faulting instruction.
 
+Interrupt delivery is now real, from `exc_helper.c`'s `handle_interrupt`/
+`xtensa_get_cintlevel` and `core-esp32/core-isa.h`'s per-line
+`XCHAL_INTn_LEVEL` table (which of the 32 CPU interrupt lines is level 1
+vs. level 3 etc. is fixed ESP32 silicon configuration, not
+software-selectable - copied into `cpu.ts` as a literal 32-entry array, not
+guessed). `Cpu.setInterruptLine(n, active)` is the one entry point anything
+external (so far: `peripherals/intmatrix.ts`, or a test) drives; `step()`
+checks for a takeable interrupt before every fetch, exactly where real
+hardware checks between instructions. Level 1 shares the exact same
+EPC1/PS.EXCM/vector path as illegal-instruction and divide-by-zero
+(`raiseGeneralException` now also takes `{kind:'interrupt', level:1}`) -
+PS.INTLEVEL is untouched, only PS.EXCM is set, matching
+`handle_interrupt`'s `level <= 1` branch precisely. Levels 2-6 get their own
+saved PC/PS-snapshot pair and their own `XCHAL_INTLEVELn_VECOFS` vector
+slot, and return via a newly-added `RFI level` instruction. `RSIL`
+(raise PS.INTLEVEL, return the *old* full packed PS) and `WSR`/`RSR`
+restricted to exactly SR 230 (PS) and SR 228 (INTENABLE) - real Xtensa SR
+numbers, not invented, decoded generically by `(r<<4)|s` in `decode.ts` but
+only backed for these two in `cpu.ts` - round out the real
+raise-interrupt-level / enable-a-line / restore-on-exit pattern ESP-IDF's
+critical sections actually use. `cpu.test.ts` proves the full round trip:
+level-1 delivery, a level-2 interrupt taken and returned via RFI, a
+level-4 interrupt correctly preempting a level-2 one already in progress
+(exercising `xtensa_get_cintlevel`'s `PS.EXCM` escalation, not just
+`PS.INTLEVEL` alone), and RSIL/WSR.PS's critical-section pattern.
+
 Not modeled: PS.CALLINC is a single `pendingCallinc` field rather than part
-of a full PS register; PS.INTLEVEL and interrupts generally aren't
-implemented (only the exception side); EXCCAUSE isn't a modeled register -
-'illegal' and 'divide-by-zero' are the only general-exception causes that
-exist so far, distinguished purely by the `ExceptionCause` tag; VECBASE has
-no WSR/RSR instruction wired to it yet (tests set it directly). BREAK.N and
-ILL.N (debug breakpoint and guaranteed-illegal, both rare in ordinary
-compiled code) aren't specially handled - they fall through to the same
-ILLEGAL path as any unrecognized opcode, which happens to be correct for
-ILL.N and an acceptable stand-in for BREAK.N until debug exceptions exist.
-SSA8L/SSA8B (byte-alignment shift setup, a narrower-use variant of
-SSL/SSR), MUL16U/MUL16S/MULUH/MULSH (16-bit and high-word multiply - only
-the 32x32->32-low MULL is implemented), and MAC16 are still unimplemented.
-A real PS register, interrupt levels, and the rest of `translate.c`'s
-opcode set (plus `cpu/fpu.ts`) remain open for Phase 2; `cpu/exceptions.ts`
-as a separate module may or may not end up warranted once PS/EPC1 grow
-further - right now that state lives directly on `Cpu` since it's small.
+of a full PS register; NMI (level 7) - unmaskable on real hardware
+(bypasses the `cintlevel` gate entirely), skipped since nothing raises it
+yet; interrupt *type* (level/edge/software/timer/NMI,`XCHAL_INTn_TYPE`) -
+every line here behaves as level-type, true for ESP32's real peripheral
+lines but not for edge/software/timer lines, which would need real
+WSR.INTSET/INTCLEAR semantics this repo doesn't have; RFE (return from a
+level-1 exception/interrupt) - illegal-instruction/divide-by-zero/level-1-
+interrupt vectoring was already exercised without a full return in earlier
+tests, and that scope boundary carries forward unchanged. EXCCAUSE isn't a
+modeled register - 'illegal', 'divide-by-zero', and 'interrupt' are the
+only general-exception causes that exist so far, distinguished purely by
+the `ExceptionCause` tag; VECBASE still has no WSR/RSR instruction wired to
+it (tests set it directly). BREAK.N and ILL.N (debug breakpoint and
+guaranteed-illegal, both rare in ordinary compiled code) aren't specially
+handled - they fall through to the same ILLEGAL path as any unrecognized
+opcode, which happens to be correct for ILL.N and an acceptable stand-in
+for BREAK.N until debug exceptions exist. SSA8L/SSA8B (byte-alignment shift
+setup, a narrower-use variant of SSL/SSR), MUL16U/MUL16S/MULUH/MULSH
+(16-bit and high-word multiply - only the 32x32->32-low MULL is
+implemented), and MAC16 are still unimplemented. The rest of
+`translate.c`'s opcode set (plus `cpu/fpu.ts`) remains open for Phase 2;
+`cpu/exceptions.ts` as a separate module may or may not end up warranted -
+this increment reinforces that the state (PS.EXCM/INTLEVEL/OWB, EPC/EPS by
+level) is cohesive enough to keep living directly on `Cpu` rather than
+needing its own file yet.
 
 Phase 3 (started): `soc/bus.ts`'s `SystemBus` is the first thing in the
 project backed by real bytes rather than a test double - one `Uint8Array`
@@ -280,10 +315,11 @@ peripheral (GPIO, below) was a data addition, not new dispatch logic.
 Not implemented for UART0, and why: RX (`UART_FIFO` always reads back
 0xEE, matching the reference's own "FIFO empty" case, since there's no
 receive path yet); interrupt generation (`UART_INT_RAW`/`ST` would need
-`esp32_uart_update_irq` and a wired interrupt matrix, which is its own
-`peripherals/intmatrix.ts` - not started); baud-rate timing (`UART_CLKDIV`
-is stored but nothing paces against it, since this interpreter has no
-real-time clock to pace against yet). UART1/UART2 remain fully open.
+`esp32_uart_update_irq` - the interrupt matrix itself now exists, see
+below, but nothing computes UART0's live interrupt condition to feed into
+it yet); baud-rate timing (`UART_CLKDIV` is stored but nothing paces
+against it, since this interpreter has no real-time clock to pace against
+yet). UART1/UART2 remain fully open.
 
 `peripherals/gpio.ts`'s `Gpio` (digital I/O only) is the second live
 peripheral, from `include/hw/esp32/esp32_gpio.h`/`hw/esp32/esp32_gpio.c`.
@@ -302,11 +338,12 @@ a pin as output and toggle it high/low, observed via `bus.gpio.getPin()`.
 
 Not implemented for GPIO, and why: GPIO_STATUS and per-pin edge/level
 interrupt generation (`gpio_pin[]`'s int_type field, GPIO_PCPU_INT/
-ACPU_INT) - meaningless without a wired interrupt matrix
-(`peripherals/intmatrix.ts`, not started); the IO_MUX-driven signal routing
-matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a GPIO
-to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O -
-out of scope until IO_MUX itself exists.
+ACPU_INT) - the interrupt matrix exists now (below), but nothing computes
+a live per-pin interrupt condition to feed into it, since GPIO's own
+`gpio_pin[]` int_type config isn't modeled; the IO_MUX-driven signal
+routing matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a
+GPIO to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O
+- out of scope until IO_MUX itself exists.
 
 `peripherals/timer.ts`'s `Timg` (TIMG0's registers + WDT unlock/feed) is
 the third live peripheral, from `include/hw/esp32/esp32_timg.h`/`hw/esp32/
@@ -331,10 +368,39 @@ WDTCONFIG0's EN bit, re-lock) run through `S32I` end to end.
 
 Not implemented for TIMG0: any interrupt ever actually firing
 (`TIMG_INT_RAW` is never set by this peripheral - same root cause as the
-counters, plus no interrupt matrix to deliver through); LACT (the legacy
-always-on RTC timer) and RTC calibration registers; TIMG1 as a wired second
-instance (the `Timg` class itself is instance-agnostic and works for
-either, only TIMG0 is connected to `soc/bus.ts` so far).
+counters); LACT (the legacy always-on RTC timer) and RTC calibration
+registers; TIMG1 as a wired second instance (the `Timg` class itself is
+instance-agnostic and works for either, only TIMG0 is connected to
+`soc/bus.ts` so far).
 
-Every other peripheral in `PERIPHERAL_BASE` (SAR ADC, interrupt matrix,
-IO_MUX) remains fully open.
+`peripherals/intmatrix.ts`'s `IntMatrix` is the fourth live peripheral -
+the real 69-entry-per-CPU register array from `hw/xtensa/esp32_intc.c`
+(`esp32_intmatrix_read`/`_write`/`_irq_handler`), mapped at its real
+address (`PERIPHERAL_BASE.dport + 0x104`, i.e. `A_DPORT_PRO_MAC_INTR_MAP` -
+these registers really do live inside DPORT's own window, even though
+`soc/dport.ts` doesn't exist yet). `IntMatrix.attach(cpu)` wires its output
+to a `Cpu` (a `SystemBus` doesn't otherwise hold a `Cpu` reference, so this
+is an explicit step the embedder takes once after constructing both).
+`setSourceLevel(source, level)` is `esp32_intmatrix_irq_handler`'s
+equivalent - the entry point a peripheral's live condition would drive. A
+reference quirk is preserved deliberately rather than "fixed": writing
+exactly the value `6` to a map register (`INTMATRIX_UNINT_VALUE`, also the
+reset default for every entry) is a firmware idiom for "disconnect this
+source" - it lowers whatever CPU line was previously routed to, without
+treating 6 as a distinct "disabled" sentinel bit anywhere else in the
+model. `test/soc/bus.test.ts` proves a full real path end to end: GPIO's
+interrupt source (by number, `ETS_GPIO_INTR_SOURCE`=22) routed through the
+matrix to a CPU line, asserted via `setSourceLevel`, and taken by a real
+`Cpu.step()`.
+
+Explicitly deferred, and why: no peripheral's live interrupt condition is
+computed and fed into `IntMatrix.setSourceLevel` automatically yet - doing
+that needs a "sync each peripheral's condition into its source line once
+per step" concept that doesn't exist in this poll/step-based interpreter,
+and is a separate scope decision from the matrix mechanism itself (which
+is real and independently testable today, as shown above). Multiple
+sources mapped to the same CPU line aren't OR'd - matching the reference's
+own literal behavior (last event wins) rather than "improving" on it.
+
+Every other peripheral in `PERIPHERAL_BASE` (SAR ADC, IO_MUX) remains fully
+open.

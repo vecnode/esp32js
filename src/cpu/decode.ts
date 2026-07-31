@@ -14,7 +14,8 @@
  *   - 24-bit ("wide"): ADD, SUB, ADDI, AND, OR, XOR, NEG, ABS, NSA, NSAU,
  *     MULL, QUOU, QUOS, REMU, REMS, MOVI, L32I, S32I, L32R, L32E, S32E, J,
  *     BEQ, BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU,
- *     SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI.
+ *     SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI, RSIL, RFI,
+ *     RSR/WSR (PS and INTENABLE only).
  *   - 16-bit ("density"/".N"): ADD.N, ADDI.N, L32I.N, S32I.N, MOVI.N,
  *     BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N.
  * Anything else decodes to ILLEGAL - the opcode table matches translate.c's
@@ -82,7 +83,10 @@ export type Decoded =
   | { op: 'RET' }
   | { op: 'RETW' }
   | { op: 'RFWO' }
-  | { op: 'RFWU' };
+  | { op: 'RFWU' }
+  | { op: 'RSIL'; dest: number; level: number }
+  | { op: 'RFI'; level: number }
+  | { op: 'RSR' | 'WSR'; sr: number; reg: number };
 
 /** Sign-extend the low `bits` bits of `value` to a 32-bit signed int. */
 function sext(value: number, bits: number): number {
@@ -146,10 +150,15 @@ export function decode(word: number): Decoded {
             if (t === 0x8) return { op: 'RET' };
             if (t === 0x9) return { op: 'RETW' };
           }
-          // RFWO/RFWU: r=3, t=0, s=4/5
-          if (r === 0x3 && t === 0x0) {
-            if (s === 0x4) return { op: 'RFWO' };
-            if (s === 0x5) return { op: 'RFWU' };
+          // RSIL: r=6 (fixed), dest=t, level=s (immediate 0-15)
+          if (r === 0x6) return { op: 'RSIL', dest: t, level: s };
+          // r=3 family: t=0 -> RFWO/RFWU (sub-selected by s); t=1 -> RFI (level=s)
+          if (r === 0x3) {
+            if (t === 0x0) {
+              if (s === 0x4) return { op: 'RFWO' };
+              if (s === 0x5) return { op: 'RFWU' };
+            }
+            if (t === 0x1) return { op: 'RFI', level: s };
           }
         }
         if (op2 === 0x4) {
@@ -195,6 +204,17 @@ export function decode(word: number): Decoded {
         const offset = ((0xfffffff0 | r) << 2) | 0;
         if (op2 === 0x0) return { op: 'L32E', dest: t, base: s, offset };
         if (op2 === 0x4) return { op: 'S32E', src: t, base: s, offset };
+      }
+      if (op1 === 0x3) {
+        // RSR/WSR: op2 selects (0=RSR, 1=WSR); the special-register number
+        // is (r<<4)|s (e.g. PS=0xE6=230, INTENABLE=0xE4=228 - each named
+        // SR gets its own opcode in the reference, but they all share this
+        // same field layout, so decoding the SR number generically and
+        // letting cpu.ts decide which ones it backs is simpler than one
+        // Decoded variant per register name).
+        const sr = (r << 4) | s;
+        if (op2 === 0x0) return { op: 'RSR', sr, reg: t };
+        if (op2 === 0x1) return { op: 'WSR', sr, reg: t };
       }
       break;
 

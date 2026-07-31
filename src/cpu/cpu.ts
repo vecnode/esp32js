@@ -76,6 +76,47 @@
  * illegal opcodes and window over/underflow are all handled by vectoring,
  * same as real silicon - `step()` always returns normally, and callers
  * observe what happened (if anything) via `Cpu.lastException`.
+ *
+ * Interrupt delivery, from `exc_helper.c`'s `handle_interrupt` and
+ * `xtensa_get_cintlevel`, `core-esp32/core-isa.h`'s per-line `XCHAL_INTn_
+ * LEVEL` table (real ESP32 hardware wiring - which of the 32 CPU interrupt
+ * lines is "level 1" vs "level 3" etc. is fixed silicon configuration, not
+ * software-selectable), and `cpu.h`'s SR field layout (`PS_INTLEVEL`,
+ * `PS_EXCM`). `Cpu.setInterruptLine(line, active)` is the one entry point a
+ * peripheral (or, so far, only a test) drives to assert/deassert a line;
+ * `step()` checks for a takeable interrupt before every fetch, exactly
+ * where real hardware checks between instructions:
+ *   - The "current interrupt level" is `max(PS.INTLEVEL, PS.EXCM ? 3 : 0)`
+ *     (`xtensa_get_cintlevel` - ESP32's `XCHAL_EXCM_LEVEL` is 3), so any
+ *     exception or interrupt in flight (which sets PS.EXCM) blocks levels
+ *     1-3 until it's cleared, exactly like a real critical section.
+ *   - Level 1 shares the *same* vector/EPC1/EXCM path as illegal-
+ *     instruction/divide-by-zero (`raiseGeneralException`, now also taking
+ *     `{kind:'interrupt', level:1}`) - PS.INTLEVEL is untouched, only
+ *     PS.EXCM is set, matching `handle_interrupt`'s `level <= 1` branch.
+ *   - Levels 2-7 use their own dedicated EPC[level]/EPS[level] (saving
+ *     PC and enough of "PS" to restore it - EXCM, INTLEVEL, OWB, and the
+ *     PS.CALLINC stand-in) and their own vector slot
+ *     (`XCHAL_INTLEVELn_VECOFS`), set `PS.INTLEVEL = level` and `PS.EXCM =
+ *     1`, and are returned from via `RFI level` (restores the saved state
+ *     and jumps to the saved PC) rather than the exception path's RFWO/RFWU.
+ *   - RSIL (set PS.INTLEVEL, return the *old* full PS value) and WSR/RSR
+ *     restricted to exactly SR 230 (PS) and SR 228 (INTENABLE) - the
+ *     minimum needed for a real critical-section pattern
+ *     (`rsil`/save-old-PS/`wsr.ps`-to-restore) and enabling specific
+ *     interrupt lines. Any other special register number decodes but isn't
+ *     backed - `RSR`/`WSR` on one is treated as illegal, not silently
+ *     wrong, since this repo doesn't model that register at all yet.
+ *
+ * Deliberately not modeled: NMI (level 7) - it's unmaskable on real
+ * hardware (bypasses the `cintlevel` gate entirely) and ESP32 config
+ * reserves exactly one line for it; skipped here since nothing in this
+ * project raises it yet. Interrupt *type* (level/edge/software/timer/NMI,
+ * `XCHAL_INTn_TYPE`) isn't modeled either - every line here behaves as
+ * level-type (the caller of `setInterruptLine` is responsible for
+ * deasserting it, there's no separate "clear" instruction path) - true for
+ * ESP32's actual peripheral interrupt lines, but real edge/software lines
+ * would need real WSR.INTSET/INTCLEAR semantics this repo doesn't have.
  */
 
 import { decode, instructionLength } from './decode.js';
@@ -90,6 +131,7 @@ export interface Bus {
 export type ExceptionCause =
   | { kind: 'illegal' }
   | { kind: 'divide-by-zero' }
+  | { kind: 'interrupt'; level: number }
   | { kind: 'double' }
   | { kind: 'window-overflow'; size: 4 | 8 | 12 }
   | { kind: 'window-underflow'; size: 4 | 8 | 12 };
@@ -102,6 +144,27 @@ const VEC_WINDOW_OVERFLOW: Record<4 | 8 | 12, number> = { 4: 0x000, 8: 0x080, 12
 const VEC_WINDOW_UNDERFLOW: Record<4 | 8 | 12, number> = { 4: 0x040, 8: 0x0c0, 12: 0x140 };
 const VEC_KERNEL = 0x300; // XCHAL_KERNEL_VECOFS - general exceptions, PS.UM=0 assumed
 const VEC_DOUBLE = 0x3c0; // XCHAL_DOUBLEEXC_VECOFS
+/** XCHAL_INTLEVELn_VECOFS for n=2..6 (index 0/1/7 unused - level 1 shares VEC_KERNEL, level 7 is NMI and unsupported). */
+const VEC_INTLEVEL: Record<number, number> = { 2: 0x180, 3: 0x1c0, 4: 0x200, 5: 0x240, 6: 0x280 };
+
+/** ESP32's real, hardware-fixed level assignment for each of the 32 CPU interrupt lines (XCHAL_INTn_LEVEL, core-isa.h). */
+const LINE_LEVEL: readonly number[] = [
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 7, 3, 5, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 3, 4, 3, 4, 5,
+];
+
+/** EXCM_LEVEL: while PS.EXCM is set, the effective interrupt level is at least this (xtensa_get_cintlevel). */
+const EXCM_LEVEL = 3;
+
+/** Special register numbers this repo backs via RSR/WSR (real Xtensa SR numbers, not invented). */
+const SR_PS = 230;
+const SR_INTENABLE = 228;
+
+interface PsSnapshot {
+  excm: boolean;
+  intlevel: number;
+  owb: number;
+  callinc: 0 | 1 | 2 | 3;
+}
 
 /** Count trailing zero bits of a 32-bit unsigned value (32 if x is 0). */
 function ctz32(x: number): number {
@@ -151,10 +214,90 @@ export class Cpu {
    */
   private pendingCallinc: 0 | 1 | 2 | 3 = 0;
 
+  /** PS.INTLEVEL (0-7 used; ESP32 has levels 1-6 plus NMI at 7, unsupported here). */
+  intlevel = 0;
+  /** INTENABLE special register: which of the 32 CPU interrupt lines can currently take. */
+  intenable = 0;
+  /** Live level of each of the 32 CPU interrupt lines - see `setInterruptLine`. */
+  private interruptLines = 0;
+  /** EPC2-EPC6 (index by level, 0/1/7 unused) - PC saved on entry to a level-2..6 interrupt. */
+  private readonly epcByLevel = new Map<number, number>();
+  /** EPS2-EPS6 (index by level) - the PsSnapshot saved on entry to a level-2..6 interrupt. */
+  private readonly psByLevel = new Map<number, PsSnapshot>();
+
   constructor(regs: RegisterFile, bus: Bus, pc = 0) {
     this.regs = regs;
     this.bus = bus;
     this.pc = pc >>> 0;
+  }
+
+  /**
+   * Assert or deassert CPU interrupt line `n` (0-31) - the one entry point
+   * a peripheral (via an interrupt matrix) or test drives. Level-triggered:
+   * the caller is responsible for deasserting it once its condition clears,
+   * matching every currently-modeled ESP32 peripheral interrupt line (see
+   * this file's header comment on interrupt *type*).
+   */
+  setInterruptLine(n: number, active: boolean): void {
+    this.interruptLines = active ? this.interruptLines | (1 << n) : this.interruptLines & ~(1 << n);
+  }
+
+  /** xtensa_get_cintlevel: PS.EXCM raises the effective level to at least EXCM_LEVEL. */
+  private currentInterruptLevel(): number {
+    return this.excm && EXCM_LEVEL > this.intlevel ? EXCM_LEVEL : this.intlevel;
+  }
+
+  private packPs(): number {
+    return (
+      ((1 << 18) | (this.pendingCallinc << 16) | (this.owb << 8) | (this.excm ? 0x10 : 0) | (this.intlevel & 0xf)) >>> 0
+    );
+  }
+
+  private unpackPs(value: number): void {
+    this.intlevel = value & 0xf;
+    this.excm = (value & 0x10) !== 0;
+    this.owb = (value >>> 8) & 0xf;
+    this.pendingCallinc = ((value >>> 16) & 0x3) as 0 | 1 | 2 | 3;
+  }
+
+  private snapshotPs(): PsSnapshot {
+    return { excm: this.excm, intlevel: this.intlevel, owb: this.owb, callinc: this.pendingCallinc };
+  }
+
+  private restorePs(snapshot: PsSnapshot): void {
+    this.excm = snapshot.excm;
+    this.intlevel = snapshot.intlevel;
+    this.owb = snapshot.owb;
+    this.pendingCallinc = snapshot.callinc;
+  }
+
+  /**
+   * HELPER(handle_interrupt): finds the highest-level active&enabled line
+   * that exceeds the current interrupt level and takes it, returning the
+   * vector address to jump to - or null if nothing is currently takeable.
+   */
+  private checkInterrupts(pc: number): number | null {
+    const active = this.interruptLines & this.intenable;
+    if (active === 0) return null;
+    const cintlevel = this.currentInterruptLevel();
+    let bestLevel = 0;
+    for (let line = 0; line < 32; line++) {
+      if (active & (1 << line)) {
+        const level = LINE_LEVEL[line]!;
+        if (level > cintlevel && level > bestLevel && level <= 6) bestLevel = level;
+      }
+    }
+    if (bestLevel === 0) return null;
+
+    if (bestLevel === 1) {
+      return this.raiseGeneralException(pc, { kind: 'interrupt', level: 1 });
+    }
+    this.epcByLevel.set(bestLevel, pc >>> 0);
+    this.psByLevel.set(bestLevel, this.snapshotPs());
+    this.intlevel = bestLevel;
+    this.excm = true;
+    this.lastException = { kind: 'interrupt', level: bestLevel };
+    return (this.vecbase + VEC_INTLEVEL[bestLevel]!) >>> 0;
   }
 
   private fetch24(addr: number): number {
@@ -172,7 +315,7 @@ export class Cpu {
    * `ExceptionCause` tag. Escalates to the double-exception vector if
    * PS.EXCM was already set, exactly as `HELPER(exception_cause)` does.
    */
-  private raiseGeneralException(pc: number, cause: { kind: 'illegal' } | { kind: 'divide-by-zero' }): number {
+  private raiseGeneralException(pc: number, cause: { kind: 'illegal' } | { kind: 'divide-by-zero' } | { kind: 'interrupt'; level: 1 }): number {
     const wasExcm = this.excm;
     this.epc1 = pc >>> 0;
     this.excm = true;
@@ -207,6 +350,13 @@ export class Cpu {
   step(): void {
     this.lastException = null;
     const pc = this.pc;
+
+    const interruptVector = this.checkInterrupts(pc);
+    if (interruptVector !== null) {
+      this.pc = interruptVector;
+      return;
+    }
+
     const word = this.fetch24(pc);
     const inst = decode(word);
     let nextPc = (pc + instructionLength(word)) >>> 0;
@@ -425,6 +575,34 @@ export class Cpu {
         nextPc = this.epc1 >>> 0;
         break;
       }
+      case 'RSIL':
+        this.regs.set(inst.dest, this.packPs());
+        this.intlevel = inst.level & 0xf;
+        break;
+      case 'RFI': {
+        const saved = this.psByLevel.get(inst.level);
+        const savedPc = this.epcByLevel.get(inst.level);
+        if (saved === undefined || savedPc === undefined) {
+          // No matching level-2..6 interrupt entry to return from - real
+          // hardware behavior for a bogus level here isn't modeled; treat
+          // as illegal rather than silently jumping somewhere wrong.
+          nextPc = this.raiseIllegal(pc);
+          break;
+        }
+        this.restorePs(saved);
+        nextPc = savedPc >>> 0;
+        break;
+      }
+      case 'RSR':
+        if (inst.sr === SR_PS) this.regs.set(inst.reg, this.packPs());
+        else if (inst.sr === SR_INTENABLE) this.regs.set(inst.reg, this.intenable >>> 0);
+        else nextPc = this.raiseIllegal(pc); // unbacked special register
+        break;
+      case 'WSR':
+        if (inst.sr === SR_PS) this.unpackPs(this.regs.get(inst.reg));
+        else if (inst.sr === SR_INTENABLE) this.intenable = this.regs.get(inst.reg) >>> 0;
+        else nextPc = this.raiseIllegal(pc);
+        break;
       case 'BEQ':
       case 'BNE':
       case 'BLT':
