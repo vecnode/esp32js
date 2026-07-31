@@ -366,4 +366,39 @@ describe('decode', () => {
       expect(decode(word)).toEqual({ op: 'SRAI', dest: 4, src: 7, shift: 26 });
     });
   });
+
+  describe('ADDI, NSA/NSAU, MULL, and the div32 family', () => {
+    it('decodes ADDI (op0=2,r=0xc) with dest=t, src=s, and a signed imm8', () => {
+      const t = 3;
+      const s = 1;
+      const imm8 = 0xfe; // -2
+      const word = (imm8 << 16) | (0xc << 12) | (s << 8) | (t << 4) | 0x2;
+      expect(decode(word)).toEqual({ op: 'ADDI', dest: 3, src: 1, imm: -2 });
+    });
+
+    it('decodes NSA (op1=0,op2=4,r=0xe), dest=t, src=s', () => {
+      const word = rrr(0x4, 0x0, 0xe, 5, 6);
+      expect(decode(word)).toEqual({ op: 'NSA', dest: 6, src: 5 });
+    });
+
+    it('decodes NSAU (op1=0,op2=4,r=0xf)', () => {
+      const word = rrr(0x4, 0x0, 0xf, 5, 6);
+      expect(decode(word)).toEqual({ op: 'NSAU', dest: 6, src: 5 });
+    });
+
+    it('decodes MULL (op1=2,op2=8)', () => {
+      const word = rrr(0x8, 0x2, 4, 1, 2);
+      expect(decode(word)).toEqual({ op: 'MULL', dest: 4, src1: 1, src2: 2 });
+    });
+
+    it.each([
+      ['QUOU', 0xc],
+      ['QUOS', 0xd],
+      ['REMU', 0xe],
+      ['REMS', 0xf],
+    ] as const)('decodes %s (op1=2, op2=0x%s)', (name, op2) => {
+      const word = rrr(op2, 0x2, 4, 1, 2);
+      expect(decode(word)).toEqual({ op: name, dest: 4, src1: 1, src2: 2 });
+    });
+  });
 });
