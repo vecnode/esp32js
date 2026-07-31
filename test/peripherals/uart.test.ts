@@ -2,14 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { Uart0, UART_REG } from '../../src/peripherals/uart.js';
 
 describe('Uart0', () => {
-  it('calls onTx with each byte written to UART_FIFO', () => {
+  it('calls onTx with each byte once its real transmit time elapses (TX pacing)', () => {
     const uart = new Uart0();
     const bytes: number[] = [];
     uart.onTx = (b) => bytes.push(b);
 
     uart.writeWord(UART_REG.FIFO, 0x48); // 'H'
     uart.writeWord(UART_REG.FIFO, 0x69); // 'i'
+    expect(bytes).toEqual([]); // queued, not yet transmitted
 
+    uart.advance(1_000_000n); // 1ms - comfortably more than two bytes at any real baud rate
     expect(bytes).toEqual([0x48, 0x69]);
   });
 
@@ -19,6 +21,7 @@ describe('Uart0', () => {
     uart.onTx = (b) => (last = b);
 
     uart.writeWord(UART_REG.FIFO, 0x1ff); // only the low byte should reach onTx
+    uart.advance(1_000_000n);
     expect(last).toBe(0xff);
   });
 
@@ -27,9 +30,12 @@ describe('Uart0', () => {
     expect(uart.readWord(UART_REG.FIFO)).toBe(0xee);
   });
 
-  it('reads UART_STATUS as 0 (no RX, TX drains synchronously)', () => {
+  it('UART_STATUS reflects a queued TX byte, and drops back to 0 once it transmits', () => {
     const uart = new Uart0();
     uart.writeWord(UART_REG.FIFO, 0x41);
+    expect(uart.readWord(UART_REG.STATUS)).toBe(1 << 16); // TXFIFO_CNT=1, RXFIFO_CNT=0
+
+    uart.advance(1_000_000n);
     expect(uart.readWord(UART_REG.STATUS)).toBe(0);
   });
 
@@ -109,9 +115,12 @@ describe('Uart0 RX injection and interrupts', () => {
     expect(events).toEqual([true]);
   });
 
-  it('TXFIFO_EMPTY is always set (TX drains synchronously) - see class doc comment', () => {
+  it('TXFIFO_EMPTY clears while a byte is queued/in-flight, and sets again once it transmits', () => {
     const uart = new Uart0();
-    uart.writeWord(UART_REG.FIFO, 0x41); // any write triggers a recompute, same as real hardware
+    uart.writeWord(UART_REG.FIFO, 0x41);
+    expect(uart.readWord(UART_REG.INT_RAW) & TXFIFO_EMPTY).toBe(0);
+
+    uart.advance(1_000_000n);
     expect(uart.readWord(UART_REG.INT_RAW) & TXFIFO_EMPTY).toBe(TXFIFO_EMPTY);
   });
 
@@ -121,6 +130,7 @@ describe('Uart0 RX injection and interrupts', () => {
     uart.onTx = (b) => output.push(b);
     uart.writeWord(UART_REG.FIFO, 'O'.charCodeAt(0));
     uart.writeWord(UART_REG.FIFO, 'K'.charCodeAt(0));
+    uart.advance(1_000_000n);
     expect(output).toEqual([0x4f, 0x4b]);
 
     uart.pushRx('Y'.charCodeAt(0));
@@ -180,5 +190,63 @@ describe('Uart0 RX injection and interrupts', () => {
       expect(events).toEqual([false]);
       expect(uart.readWord(UART_REG.INT_RAW) & RXFIFO_TOUT).toBe(0);
     });
+  });
+});
+
+describe('Uart0 TX pacing', () => {
+  const TX_DONE = 1 << 14;
+  // CLKDIV=2 (int part, frag=0) -> baudRate = 80MHz*16/(2*16) = 40MHz. The
+  // default CONF0 (8 data bits, 1 stop, no parity - esp32_uart_reset_hold's
+  // real reset default) is 10 bits/frame -> 10 * 1e9 / 40MHz = 250ns/byte.
+  const CONF0_5N1 = (1 << 27) | (1 << 4) | (0 << 2); // BIT_NUM=0 -> 5 data bits, STOP_BIT_NUM=1
+
+  it('drains multiple queued bytes within a single advance() call that spans more than one frame time', () => {
+    const uart = new Uart0();
+    uart.writeWord(UART_REG.CLKDIV, 2);
+    const bytes: number[] = [];
+    uart.onTx = (b) => bytes.push(b);
+
+    uart.writeWord(UART_REG.FIFO, 1);
+    uart.writeWord(UART_REG.FIFO, 2);
+    uart.writeWord(UART_REG.FIFO, 3);
+    expect(bytes).toEqual([]); // all still queued/in-flight
+
+    uart.advance(750n); // 3 * 250ns - exactly enough for all three
+    expect(bytes).toEqual([1, 2, 3]);
+  });
+
+  it('a byte\'s transmit time depends on real UART_CONF0 framing fields (data/stop/parity bits)', () => {
+    const uart = new Uart0();
+    uart.writeWord(UART_REG.CLKDIV, 2);
+    uart.writeWord(UART_REG.CONF0, CONF0_5N1); // 1+5+0+1 = 7 bits/frame -> 175ns
+    let fired = false;
+    uart.onTx = () => (fired = true);
+
+    uart.writeWord(UART_REG.FIFO, 1);
+    uart.advance(174n);
+    expect(fired).toBe(false);
+    uart.advance(1n); // reaches 175ns
+    expect(fired).toBe(true);
+  });
+
+  it('UART_STATUS TXFIFO_CNT and TX_DONE reflect real queue depth while bytes are in flight', () => {
+    const uart = new Uart0();
+    uart.writeWord(UART_REG.CLKDIV, 2);
+    uart.writeWord(UART_REG.INT_ENA, TX_DONE);
+    uart.writeWord(UART_REG.FIFO, 1);
+    uart.writeWord(UART_REG.FIFO, 2);
+
+    expect((uart.readWord(UART_REG.STATUS) >>> 16) & 0xff).toBe(2);
+    expect(uart.readWord(UART_REG.INT_RAW) & TX_DONE).toBe(TX_DONE);
+
+    uart.advance(750n); // comfortably drains both
+    expect((uart.readWord(UART_REG.STATUS) >>> 16) & 0xff).toBe(0);
+    expect(uart.readWord(UART_REG.INT_RAW) & TX_DONE).toBe(0);
+  });
+
+  it('drops bytes once the 128-byte TX FIFO is full, matching fifo8_push\'s own free-space check', () => {
+    const uart = new Uart0();
+    for (let i = 0; i < 130; i++) uart.writeWord(UART_REG.FIFO, i & 0xff);
+    expect((uart.readWord(UART_REG.STATUS) >>> 16) & 0xff).toBe(128);
   });
 });
