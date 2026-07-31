@@ -35,7 +35,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` — **done (the subset below)**, see Phase 2 status | single-precision only (`XCHAL_HAVE_DFP=0`); MADD.S/MSUB.S, ROUND.S/CEIL.S/FLOOR.S, conditional FP moves, FCR/FSR, CPENABLE gating not modeled |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
-| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
+| `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O + per-pin edge/level interrupts)**, see Phase 4/5 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
 | `peripherals/iomux.ts` | `hw/esp32/esp32_iomux.c` — **done (per-pin register storage)**, see Phase 4 status | pins 28-31 undocumented in the reference itself, omitted here too; no GPIO function-select side effects |
 | `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (T0/T1 counters + alarms, full WDT stage pipeline)**, see Phase 4/5 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far; polled `advance(cycles)`, not real-time-paced like the reference |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
@@ -413,17 +413,17 @@ chip (a button, etc.) without going through the MMIO path.
 `test/soc/bus.test.ts` includes a "blink" test: `S32I` instructions enable
 a pin as output and toggle it high/low, observed via `bus.gpio.getPin()`.
 
-Not implemented for GPIO, and why: GPIO_STATUS and per-pin edge/level
+Not implemented for GPIO at this point in the project: per-pin edge/level
 interrupt generation (`gpio_pin[]`'s int_type field, GPIO_PCPU_INT/
-ACPU_INT) - the interrupt matrix exists now (below), but nothing computes
-a live per-pin interrupt condition to feed into it, since GPIO's own
-`gpio_pin[]` int_type config isn't modeled; the IO_MUX-driven signal
-routing matrix (GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a
-GPIO to/from a peripheral (UART TXD, SPI, etc.) instead of raw digital I/O
-- `peripherals/iomux.ts` now backs IO_MUX's own per-pin MUX_GPIOn register
+ACPU_INT) - the interrupt matrix existed already, but nothing computed a
+live per-pin interrupt condition to feed into it yet; that came later, see
+Phase 5 status below. The IO_MUX-driven signal routing matrix
+(GPIO_FUNCy_IN/OUT_SEL_CFG) real firmware uses to route a GPIO to/from a
+peripheral (UART TXD, SPI, etc.) instead of raw digital I/O is still open -
+`peripherals/iomux.ts` backs IO_MUX's own per-pin MUX_GPIOn register
 storage (see below), but nothing connects a pin's stored function-select
-value back into `Gpio`'s behavior yet, so `Gpio` still always behaves as
-raw digital I/O regardless of what's written there.
+value back into `Gpio`'s behavior, so `Gpio` still always behaves as raw
+digital I/O regardless of what's written there.
 
 `peripherals/timer.ts`'s `Timg` (TIMG0's registers + WDT unlock/feed) is
 the third live peripheral, from `include/hw/esp32/esp32_timg.h`/`hw/esp32/
@@ -576,8 +576,33 @@ an alarm/timeout more than once - harmless for the intended
 one-`Cpu.step()`-at-a-time driving pattern, worth flagging for a caller
 batching many steps into one `tick()`.
 
-Still open for Phase 5: GPIO edge/level interrupt generation; UART RX
-injection, interrupt generation, and TX pacing; and a `Board` runtime
-(`src/boards/`) tying `Cpu`+`SystemBus`+a `BoardDefinition` together with
-firmware loading and pin/serial passthroughs for ESP32 DevKit V1, DevKit C
-V4, and ESP32-CAM.
+`peripherals/gpio.ts`'s `Gpio` now generates real per-pin edge/level
+interrupts too, from `GPIO_PINn`'s `INT_TYPE` field (bits[9:7]:
+0=disabled, 1=rising, 2=falling, 3=any edge, 4=low level, 5=high level -
+`get_triggering`) and its two enable bits, `PRO_CPU_INT_ENABLE` (bit 15)
+and `APP_CPU_INT_ENABLE` (bit 13) - both routing to the same single
+combined `onInterruptChange` this class exposes, matching the reference's
+own single `qemu_irq irq` output regardless of which enable bit fired. The
+evaluation happens **only** on the `setPin` external-stimulus path
+(`set_gpio` in the reference) - the existing output-loopback write path
+(a `GPIO_OUT` write reflecting into `GPIO_IN`) updates `gpio_in` directly
+without ever touching interrupt state, exactly as the reference does: a
+chip driving its own output pin does not self-interrupt on that pin. Two
+reference quirks are preserved deliberately rather than "fixed": `GPIO_
+STATUS`/`GPIO_STATUS1` are genuinely vestigial (plain read/write storage,
+never touched by the real trigger logic - only `GPIO_PCPU_INT`/`GPIO_ACPU_
+INT` and their `_1` counterparts are the actual interrupt latches), and
+`GPIO_STATUS_W1TC`/`STATUS1_W1TC` each unconditionally lower the *combined*
+interrupt line when they succeed, without checking whether the *other*
+32-bit half (pins 0-31 vs. 32-39) still has a pending condition - so
+clearing one half's interrupts can spuriously silence a still-pending
+interrupt from the other half. `soc/bus.ts`'s constructor wires `Gpio.
+onInterruptChange` to `IntMatrix.setSourceLevel(INTMATRIX_SOURCE.GPIO,
+...)`, the same immediate-constructor-time pattern as TIMG's wiring above.
+`test/soc/bus.test.ts` proves a real rising-edge GPIO interrupt reaching a
+real `Cpu` through the matrix end to end.
+
+Still open for Phase 5: UART RX injection, interrupt generation, and TX
+pacing; and a `Board` runtime (`src/boards/`) tying `Cpu`+`SystemBus`+a
+`BoardDefinition` together with firmware loading and pin/serial
+passthroughs for ESP32 DevKit V1, DevKit C V4, and ESP32-CAM.
