@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { Cpu } from '../../src/cpu/cpu.js';
 import { RegisterFile } from '../../src/cpu/registers.js';
 import { SystemBus } from '../../src/soc/bus.js';
-import { MEMORY_MAP, type MemoryRegionName } from '../../src/soc/memmap.js';
+import { MEMORY_MAP, type MemoryRegionName, PERIPHERAL_BASE } from '../../src/soc/memmap.js';
+import { UART_REG } from '../../src/peripherals/uart.js';
 
 const regionNames = Object.keys(MEMORY_MAP) as MemoryRegionName[];
 
@@ -81,5 +82,79 @@ describe('SystemBus', () => {
 
     expect(cpu.regs.get(4)).toBe(12);
     expect(cpu.pc).toBe(base + 9);
+  });
+
+  describe('UART0 dispatch', () => {
+    it('routes a 32-bit write to UART_FIFO to Uart0.onTx exactly once', () => {
+      const bus = new SystemBus();
+      const bytes: number[] = [];
+      bus.uart0.onTx = (b) => bytes.push(b);
+
+      bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.FIFO, 0x48);
+      expect(bytes).toEqual([0x48]);
+    });
+
+    it('routes a 32-bit read from UART_DATE to the fixed reference value', () => {
+      const bus = new SystemBus();
+      expect(bus.read32(PERIPHERAL_BASE.uart0 + UART_REG.DATE)).toBe(0x15122500);
+    });
+
+    it('round-trips a plain storage register (CONF0) through read32/write32', () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0, 0xabcdef01);
+      expect(bus.read32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0)).toBe(0xabcdef01);
+    });
+
+    it('does not leak into the surrounding memory map (peripherals are unmapped there)', () => {
+      const bus = new SystemBus();
+      bus.write32(PERIPHERAL_BASE.uart0 + UART_REG.CONF0, 0xffffffff);
+      // UART0's base address itself must not have been misrouted to a MEMORY_MAP region.
+      expect(regionNames.some((name) => {
+        const { base, size } = MEMORY_MAP[name];
+        return PERIPHERAL_BASE.uart0 >= base && PERIPHERAL_BASE.uart0 < base + size;
+      })).toBe(false);
+    });
+
+    it('runs a real S32I instruction that writes a string to UART_FIFO byte by byte', () => {
+      // The classic first-peripheral smoke test: firmware "prints" by storing
+      // each character to UART_FIFO. Loads/executes from IRAM (real base
+      // address), writes to UART0 (real peripheral base address) - the two
+      // halves of the SoC map working together through one Bus.
+      const bus = new SystemBus();
+      const output: number[] = [];
+      bus.uart0.onTx = (b) => output.push(b);
+
+      const base = MEMORY_MAP.iram.base;
+      const MOVI = (dest: number, imm: number) => {
+        const raw12 = imm & 0xfff;
+        const s = (raw12 >> 8) & 0xf;
+        const imm8 = raw12 & 0xff;
+        return (imm8 << 16) | (0xa << 12) | (s << 8) | (dest << 4) | 0x2;
+      };
+      const S32I = (src: number, base_: number, byteOffset: number) => (((byteOffset >> 2) & 0xff) << 16) | (0x6 << 12) | (base_ << 8) | (src << 4) | 0x2;
+      const writeInsn = (addr: number, word: number) => {
+        bus.writeByte(addr, word & 0xff);
+        bus.writeByte(addr + 1, (word >>> 8) & 0xff);
+        bus.writeByte(addr + 2, (word >>> 16) & 0xff);
+      };
+
+      // a1 = UART0's FIFO register address (0x3ff40000 - far outside MOVI's
+      // 12-bit range, so it's set directly rather than via an instruction);
+      // a2/a3 = 'h'/'i'; S32I a2/a3 -> [a1+0].
+      const uartFifoAddr = PERIPHERAL_BASE.uart0 + UART_REG.FIFO;
+      const cpu = new Cpu(new RegisterFile(), bus, base);
+      cpu.regs.set(1, uartFifoAddr);
+      writeInsn(base, MOVI(2, 'h'.charCodeAt(0)));
+      writeInsn(base + 3, S32I(2, 1, 0));
+      writeInsn(base + 6, MOVI(3, 'i'.charCodeAt(0)));
+      writeInsn(base + 9, S32I(3, 1, 0));
+
+      cpu.step(); // MOVI a2, 'h'
+      cpu.step(); // S32I -> UART_FIFO
+      cpu.step(); // MOVI a3, 'i'
+      cpu.step(); // S32I -> UART_FIFO
+
+      expect(output).toEqual([0x68, 0x69]); // "hi"
+    });
   });
 });
