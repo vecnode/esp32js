@@ -28,6 +28,14 @@
  * (a `Cpu` holds a `Bus`, not the other way around) - call
  * `bus.intmatrix.attach(cpu)` once after constructing both.
  *
+ * `tick(cycles)` forwards a cycle delta (typically `cpu.lastStepCycles`,
+ * see `cpu/cpu.ts`) to every peripheral implementing an optional `advance`
+ * method - the entry point for peripherals that need *some* notion of
+ * elapsed time (TIMG's counters/WDT) to actually advance. Same shape as
+ * `intmatrix.attach`: `SystemBus` doesn't loop or hold a `Cpu` reference
+ * itself, a driver calls `cpu.step(); bus.tick(cpu.lastStepCycles)` once per
+ * step.
+ *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
  *   - Every other peripheral block in `PERIPHERAL_BASE` besides
  *     UART0/GPIO/TIMG0/RTC_CNTL/DPORT/IO_MUX/SENS isn't backed at all -
@@ -60,6 +68,8 @@ const DPORT_INTMATRIX_OFFSET = 0x104;
 interface PeripheralDevice {
   readWord(offset: number): number;
   writeWord(offset: number, value: number): void;
+  /** Optional: advance this peripheral's own clock-driven state (counters, watchdogs, baud pacing) by `cycles` - see `SystemBus.tick`. */
+  advance?(cycles: bigint): void;
 }
 
 interface PeripheralSlot {
@@ -101,6 +111,21 @@ export class SystemBus implements Bus {
   /** Copy `data` into `region` starting at `offset` - for preloading a firmware image or test fixture. */
   loadBytes(region: MemoryRegionName, offset: number, data: Uint8Array): void {
     this.regions[region].set(data, offset);
+  }
+
+  /**
+   * Forward `cycles` (typically `cpu.lastStepCycles` right after `cpu.step()`
+   * - see `cpu/cpu.ts`'s `CYCLE_COST` doc comment for what this is and isn't)
+   * to every peripheral that implements `advance` - TIMG's counters/WDT,
+   * eventually UART's TX pacing. `SystemBus` doesn't loop or hold a `Cpu`
+   * reference itself (same reason `intmatrix.attach(cpu)` is a separate step
+   * the embedder takes) - a driver (a `Board`, or a test) calls this once per
+   * `cpu.step()`.
+   */
+  tick(cycles: bigint): void {
+    for (const slot of this.peripherals) {
+      slot.device.advance?.(cycles);
+    }
   }
 
   private findPeripheral(addr: number): { device: PeripheralDevice; offset: number } | undefined {
