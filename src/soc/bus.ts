@@ -37,13 +37,14 @@
  * step.
  *
  * Unlike `intmatrix.attach(cpu)` (which needs a `Cpu` the embedder
- * constructs separately), TIMG0's `onInterruptChange`/`onWdtReset` and
- * GPIO's `onInterruptChange` callbacks are wired here in the constructor,
- * since `SystemBus` already owns both ends: T0/T1/WDT's interrupt
- * conditions route to `IntMatrix.setSourceLevel` at their real
- * `INTMATRIX_SOURCE.TG0_*` index, a WDT timeout configured as CPU/
- * system-reset routes to `RtcCntl.triggerWdtReset`, and GPIO's single
- * combined interrupt condition routes to `INTMATRIX_SOURCE.GPIO`.
+ * constructs separately), TIMG0's `onInterruptChange`/`onWdtReset`, GPIO's
+ * `onInterruptChange`, and UART0's `onInterruptChange` callbacks are wired
+ * here in the constructor, since `SystemBus` already owns both ends: T0/T1/
+ * WDT's interrupt conditions route to `IntMatrix.setSourceLevel` at their
+ * real `INTMATRIX_SOURCE.TG0_*` index, a WDT timeout configured as CPU/
+ * system-reset routes to `RtcCntl.triggerWdtReset`, GPIO's single combined
+ * interrupt condition routes to `INTMATRIX_SOURCE.GPIO`, and UART0's routes
+ * to `INTMATRIX_SOURCE.UART0`.
  *
  * Deliberately out of scope here (see ARCHITECTURE.md's Phase 3/4 status):
  *   - Every other peripheral block in `PERIPHERAL_BASE` besides
@@ -128,6 +129,9 @@ export class SystemBus implements Bus {
 
     // GPIO's single combined interrupt condition -> its own interrupt matrix source.
     this.gpio.onInterruptChange = (active) => this.intmatrix.setSourceLevel(INTMATRIX_SOURCE.GPIO, active ? 1 : 0);
+
+    // UART0's combined interrupt condition -> its own interrupt matrix source.
+    this.uart0.onInterruptChange = (active) => this.intmatrix.setSourceLevel(INTMATRIX_SOURCE.UART0, active ? 1 : 0);
   }
 
   /** Copy `data` into `region` starting at `offset` - for preloading a firmware image or test fixture. */
