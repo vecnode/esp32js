@@ -3,6 +3,7 @@ export { decode, instructionLength } from './cpu/decode.js';
 export type { Decoded } from './cpu/decode.js';
 export { Cpu, RESET_VECTOR } from './cpu/cpu.js';
 export type { Bus, ExceptionCause } from './cpu/cpu.js';
+export { Fpu, ftoiS, ftouiS, itofS, uitofS } from './cpu/fpu.js';
 export { MEMORY_MAP, PERIPHERAL_BASE, regionAt } from './soc/memmap.js';
 export type { MemoryRegionName, MemRegion, PeripheralName } from './soc/memmap.js';
 export { SystemBus } from './soc/bus.js';

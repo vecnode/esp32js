@@ -32,7 +32,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `cpu/registers.ts` | `target/xtensa/win_helper.c` | done — windowed register file |
 | `cpu/decode.ts`, `cpu/cpu.ts` | `target/xtensa/translate.c` (7672 lines) | opcode decode + ALU/load-store/branch semantics |
 | `cpu/exceptions.ts` | `target/xtensa/exc_helper.c`, `cpu.h` (XEA2) | **done**, but living directly on `Cpu` rather than a separate module - see Phase 2 status. Interrupt levels 1-7 dispatch (level 7 = NMI, unmaskable), RSIL/RFI/RFE/WSR.PS/RSR.PS/WSR.INTENABLE/RSR.INTENABLE all real; still open: interrupt *type* beyond level-triggered |
-| `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` | single-precision only (`XCHAL_HAVE_DFP=0`) |
+| `cpu/fpu.ts` | `target/xtensa/fpu_helper.c` — **done (the subset below)**, see Phase 2 status | single-precision only (`XCHAL_HAVE_DFP=0`); MADD.S/MSUB.S, ROUND.S/CEIL.S/FLOOR.S, conditional FP moves, FCR/FSR, CPENABLE gating not modeled |
 | `soc/memmap.ts` | `hw/xtensa/esp32_picsimlab.c:73-84` (`esp32_memmap[]`) | see table below |
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
 | `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
@@ -267,12 +267,35 @@ opcode, which happens to be correct for ILL.N and an acceptable stand-in
 for BREAK.N until debug exceptions exist. SSA8L/SSA8B (byte-alignment shift
 setup, a narrower-use variant of SSL/SSR), MUL16U/MUL16S/MULUH/MULSH
 (16-bit and high-word multiply - only the 32x32->32-low MULL is
-implemented), and MAC16 are still unimplemented. The rest of
-`translate.c`'s opcode set (plus `cpu/fpu.ts`) remains open for Phase 2;
-`cpu/exceptions.ts` as a separate module may or may not end up warranted -
-this increment reinforces that the state (PS.EXCM/INTLEVEL/OWB, EPC/EPS by
-level) is cohesive enough to keep living directly on `Cpu` rather than
-needing its own file yet.
+implemented), and MAC16 are still unimplemented. `cpu/exceptions.ts` as a
+separate module may or may not end up warranted - this increment reinforces
+that the state (PS.EXCM/INTLEVEL/OWB, EPC/EPS by level) is cohesive enough
+to keep living directly on `Cpu` rather than needing its own file yet.
+
+`cpu/fpu.ts`'s `Fpu` (single-precision FPU coprocessor state - FR register
+file + BR boolean register) is now implemented too, covering ADD.S/SUB.S/
+MUL.S, MOV.S/NEG.S/ABS.S, WFR/RFR (raw AR<->FR bit-pattern moves, no
+conversion), FLOAT.S/UFLOAT.S/TRUNC.S/UTRUNC.S (int<->float conversion
+scaled by a 4-bit unsigned immediate), OEQ.S/OLT.S/OLE.S/UN.S (FR compares
+writing one BR bit), and BT/BF (branch on a BR bit). The one detail worth
+flagging explicitly rather than assuming from the opcode names: FLOAT.S/
+UFLOAT.S negate their scale immediate before the `2^scale` multiply while
+TRUNC.S/UTRUNC.S don't (`translate_float_s`/`translate_ftoi_s` in
+`translate.c`) - confirmed from the reference rather than guessed, since
+getting the sign backwards would silently produce reciprocal-scaled values.
+Not implemented, and why: MADD.S/MSUB.S (fused multiply-add/sub) and
+ROUND.S/CEIL.S/FLOOR.S (the other three float-to-int rounding modes) are
+outside this milestone's opcode list; MOVEQZ.S/MOVNEZ.S/MOVLTZ.S/MOVGEZ.S/
+MOVF.S/MOVT.S (conditional FP moves) and UEQ.S/ULT.S/ULE.S (unordered-or-
+true compare variants) aren't implemented either; FCR/FSR (rounding-mode
+and sticky-exception-flag user registers) and CPENABLE gating (real
+hardware traps FPU use before CPENABLE enables it) aren't modeled - every
+FP op here behaves as round-to-nearest-even with no flag tracking and no
+enable check, see `fpu.ts`'s own doc comment for the full detail. Arithmetic
+uses JS's `Math.fround` for IEEE-754 single-precision rounding rather than
+QEMU's `softfloat` library bit-for-bit - close enough for real firmware's
+FP usage (sensor scaling, simple math), but doesn't claim to replicate
+softfloat's subnormal/NaN-payload edge cases exactly.
 
 Phase 3 (started): `soc/bus.ts`'s `SystemBus` is the first thing in the
 project backed by real bytes rather than a test double - one `Uint8Array`

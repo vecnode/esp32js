@@ -95,6 +95,26 @@ const branch = (r: number, a: number, b: number, offset: number) => ((offset & 0
 const BEQ = (a: number, b: number, offset: number) => branch(0x1, a, b, offset);
 const BLT = (a: number, b: number, offset: number) => branch(0x2, a, b, offset);
 
+// FPU (single-precision) encoders - op0=0, op1=0xa/0xb (see decode.ts).
+const ADD_S = (dest: number, s1: number, s2: number) => (0xa << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const SUB_S = (dest: number, s1: number, s2: number) => (0x1a << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const MUL_S = (dest: number, s1: number, s2: number) => (0x2a << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const MOV_S = (dest: number, src: number) => (0xfa << 16) | (dest << 12) | (src << 8);
+const ABS_S = (dest: number, src: number) => (0xfa << 16) | (dest << 12) | (src << 8) | (1 << 4);
+const NEG_S = (dest: number, src: number) => (0xfa << 16) | (dest << 12) | (src << 8) | (6 << 4);
+const WFR = (frDest: number, arSrc: number) => (0xfa << 16) | (frDest << 12) | (arSrc << 8) | (5 << 4);
+const RFR = (arDest: number, frSrc: number) => (0xfa << 16) | (arDest << 12) | (frSrc << 8) | (4 << 4);
+const FLOAT_S = (frDest: number, arSrc: number, scale: number) => (0xca << 16) | (frDest << 12) | (arSrc << 8) | ((scale & 0xf) << 4);
+const UFLOAT_S = (frDest: number, arSrc: number, scale: number) => (0xda << 16) | (frDest << 12) | (arSrc << 8) | ((scale & 0xf) << 4);
+const TRUNC_S = (arDest: number, frSrc: number, scale: number) => (0x9a << 16) | (arDest << 12) | (frSrc << 8) | ((scale & 0xf) << 4);
+const UTRUNC_S = (arDest: number, frSrc: number, scale: number) => (0xea << 16) | (arDest << 12) | (frSrc << 8) | ((scale & 0xf) << 4);
+const OEQ_S = (brDest: number, s1: number, s2: number) => (0x2b << 16) | (brDest << 12) | (s1 << 8) | (s2 << 4);
+const OLT_S = (brDest: number, s1: number, s2: number) => (0x4b << 16) | (brDest << 12) | (s1 << 8) | (s2 << 4);
+const OLE_S = (brDest: number, s1: number, s2: number) => (0x6b << 16) | (brDest << 12) | (s1 << 8) | (s2 << 4);
+const UN_S = (brDest: number, s1: number, s2: number) => (0x1b << 16) | (brDest << 12) | (s1 << 8) | (s2 << 4);
+const BT = (br: number, offset: number) => (((offset & 0xff) << 16) | (1 << 12) | (br << 8) | (7 << 4) | 0x6) >>> 0;
+const BF = (br: number, offset: number) => (((offset & 0xff) << 16) | (0 << 12) | (br << 8) | (7 << 4) | 0x6) >>> 0;
+
 // Density (16-bit) encoders.
 const ADD_N = (dest: number, s1: number, s2: number) => (dest << 12) | (s1 << 8) | (s2 << 4) | 0xa;
 const ADDI_N = (dest: number, src: number, rawT: number) => (dest << 12) | (src << 8) | (rawT << 4) | 0xb;
@@ -933,6 +953,120 @@ describe('Cpu fetch/execute', () => {
       cpu.step(); // RFI 7
       expect(cpu.pc).toBe(0);
       expect(cpu.excm).toBe(true); // restored to what it was before the NMI (true)
+    });
+  });
+
+  describe('FPU (single-precision) instructions', () => {
+    it('runs ADD.S/SUB.S/MUL.S on the FR register file', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.fpu.setFr(1, 2.5);
+      cpu.fpu.setFr(2, 4);
+      bus.writeInsn(0, ADD_S(3, 1, 2));
+      bus.writeInsn(3, SUB_S(4, 1, 2));
+      bus.writeInsn(6, MUL_S(5, 1, 2));
+
+      cpu.step();
+      expect(cpu.fpu.getFr(3)).toBe(6.5);
+      cpu.step();
+      expect(cpu.fpu.getFr(4)).toBe(-1.5);
+      cpu.step();
+      expect(cpu.fpu.getFr(5)).toBe(10);
+    });
+
+    it('runs MOV.S/NEG.S/ABS.S', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.fpu.setFr(1, -3.5);
+      bus.writeInsn(0, MOV_S(2, 1));
+      bus.writeInsn(3, NEG_S(3, 1));
+      bus.writeInsn(6, ABS_S(4, 1));
+
+      cpu.step();
+      expect(cpu.fpu.getFr(2)).toBe(-3.5);
+      cpu.step();
+      expect(cpu.fpu.getFr(3)).toBe(3.5);
+      cpu.step();
+      expect(cpu.fpu.getFr(4)).toBe(3.5);
+    });
+
+    it('WFR/RFR move a raw 32-bit pattern between AR and FR with no conversion', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0x2a));
+      bus.writeInsn(3, WFR(2, 1)); // fr2 <- raw bits of a1
+      bus.writeInsn(6, RFR(3, 2)); // a3 <- raw bits of fr2
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.fpu.readFrBits(2)).toBe(0x2a);
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe(0x2a);
+    });
+
+    it('FLOAT.S/UFLOAT.S convert an AR integer to FR, scaled by 2^-scale', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 5));
+      bus.writeInsn(3, FLOAT_S(0, 1, 0)); // 5 * 2^0 = 5
+      bus.writeInsn(6, FLOAT_S(1, 1, 1)); // 5 * 2^-1 = 2.5
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.fpu.getFr(0)).toBe(5);
+      cpu.step();
+      expect(cpu.fpu.getFr(1)).toBe(2.5);
+
+      const { cpu: cpu2, bus: bus2 } = makeCpu();
+      cpu2.regs.set(1, 0xfffffffb); // -5 as a raw bit pattern, out of MOVI's 12-bit range
+      bus2.writeInsn(0, UFLOAT_S(0, 1, 0)); // treated as the unsigned value 4294967291
+      cpu2.step();
+      expect(cpu2.fpu.getFr(0)).toBe(Math.fround(0xfffffffb));
+    });
+
+    it('TRUNC.S/UTRUNC.S convert an FR value to AR, scaled by 2^scale and truncated toward zero', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.fpu.setFr(1, 3.75);
+      cpu.fpu.setFr(2, -3.75);
+      bus.writeInsn(0, TRUNC_S(2, 1, 0)); // trunc(3.75) = 3
+      bus.writeInsn(3, TRUNC_S(3, 2, 0)); // trunc(-3.75) = -3
+      bus.writeInsn(6, UTRUNC_S(4, 1, 1)); // trunc(3.75 * 2) = 7
+
+      cpu.step();
+      expect(cpu.regs.get(2) | 0).toBe(3);
+      cpu.step();
+      expect(cpu.regs.get(3) | 0).toBe(-3);
+      cpu.step();
+      expect(cpu.regs.get(4)).toBe(7);
+    });
+
+    it('OEQ.S/OLT.S/OLE.S set a BR bit; BT/BF branch on it', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.fpu.setFr(1, 1);
+      cpu.fpu.setFr(2, 2);
+      bus.writeInsn(0, OLT_S(3, 1, 2)); // 1 < 2 -> br3 = true
+      bus.writeInsn(3, OEQ_S(4, 1, 2)); // 1 == 2 -> br4 = false
+      bus.writeInsn(6, OLE_S(5, 1, 1)); // 1 <= 1 -> br5 = true
+
+      cpu.step();
+      expect(cpu.fpu.getBr(3)).toBe(true);
+      cpu.step();
+      expect(cpu.fpu.getBr(4)).toBe(false);
+      cpu.step();
+      expect(cpu.fpu.getBr(5)).toBe(true);
+
+      bus.writeInsn(9, BT(3, 20)); // br3 is true -> branch taken
+      bus.writeInsn(12, BF(4, 20)); // br4 is false -> branch taken
+      cpu.step();
+      expect(cpu.pc).toBe(9 + 4 + 20);
+      cpu.pc = 12;
+      cpu.step();
+      expect(cpu.pc).toBe(12 + 4 + 20);
+    });
+
+    it('UN.S sets its BR bit when either operand is NaN', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.fpu.setFr(1, NaN);
+      cpu.fpu.setFr(2, 1);
+      bus.writeInsn(0, UN_S(7, 1, 2));
+      cpu.step();
+      expect(cpu.fpu.getBr(7)).toBe(true);
     });
   });
 });
