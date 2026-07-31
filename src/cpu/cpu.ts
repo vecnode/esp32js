@@ -125,9 +125,54 @@
  * would need real WSR.INTSET/INTCLEAR semantics this repo doesn't have.
  */
 
-import { decode, instructionLength } from './decode.js';
+import { decode, instructionLength, type Decoded } from './decode.js';
 import { Fpu, ftoiS, ftouiS, itofS, uitofS } from './fpu.js';
 import type { RegisterFile } from './registers.js';
+
+/**
+ * Per-opcode cycle cost for `Cpu.cycles` - an approximation, not a fact taken
+ * from this repo's QEMU fork. Unlike AVR (where avr8js's own per-instruction
+ * cycle counts come straight from Atmel's published datasheet timing table),
+ * Xtensa has no equivalently simple public per-opcode cycle table, and this
+ * repo's own QEMU source doesn't model per-instruction guest timing either
+ * (TCG dispatch isn't cycle-accurate without `icount`, which this fork
+ * doesn't use). These costs exist so peripherals that need *some* notion of
+ * elapsed time (TIMG's counters, UART baud pacing) have a monotonic clock to
+ * advance against - plausible relative weights (memory access and
+ * divide/FPU cost more than a register-register ALU op), not a claim about
+ * real ESP32 silicon timing. Anything not listed defaults to 1 cycle.
+ */
+const CYCLE_COST: Partial<Record<Decoded['op'], bigint>> = {
+  L32I: 2n,
+  S32I: 2n,
+  L32R: 2n,
+  L32E: 2n,
+  S32E: 2n,
+  MULL: 2n,
+  QUOU: 4n,
+  QUOS: 4n,
+  REMU: 4n,
+  REMS: 4n,
+  CALL0: 2n,
+  CALLN: 2n,
+  RET: 2n,
+  RETW: 2n,
+  ENTRY: 3n,
+  RFWO: 3n,
+  RFWU: 3n,
+  RFI: 3n,
+  RFE: 3n,
+  ADD_S: 3n,
+  SUB_S: 3n,
+  MUL_S: 3n,
+  FLOAT_S: 4n,
+  UFLOAT_S: 4n,
+  TRUNC_S: 4n,
+  UTRUNC_S: 4n,
+};
+
+/** Flat cost for taking an interrupt or exception vector - same approximation caveat as `CYCLE_COST`. */
+const EXCEPTION_COST = 4n;
 
 export interface Bus {
   readByte(addr: number): number;
@@ -210,6 +255,16 @@ export class Cpu {
   epc1 = 0;
   /** Set by step() when an exception fired this step; null otherwise. */
   lastException: ExceptionCause | null = null;
+
+  /**
+   * Monotonic count of approximated cycles elapsed (see `CYCLE_COST`'s doc
+   * comment for what this is and isn't). A `bigint`, matching `Timg`'s own
+   * 64-bit counters (`peripherals/timer.ts`) - a `number` would lose
+   * precision long before any real simulation session finishes.
+   */
+  cycles = 0n;
+  /** The cost `step()` just added to `cycles` - what a caller forwards to `SystemBus.tick()` without recomputing it. */
+  lastStepCycles = 0n;
 
   /**
    * SAR (shift amount register). SSR/SSAI store the amount directly (0-31);
@@ -385,6 +440,8 @@ export class Cpu {
     const interruptVector = this.checkInterrupts(pc);
     if (interruptVector !== null) {
       this.pc = interruptVector;
+      this.lastStepCycles = EXCEPTION_COST;
+      this.cycles += EXCEPTION_COST;
       return;
     }
 
@@ -724,6 +781,9 @@ export class Cpu {
         break;
     }
 
+    const cost = this.lastException !== null ? EXCEPTION_COST : (CYCLE_COST[inst.op] ?? 1n);
+    this.lastStepCycles = cost;
+    this.cycles += cost;
     this.pc = nextPc;
   }
 }
