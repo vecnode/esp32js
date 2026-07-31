@@ -135,18 +135,20 @@ describe('Uart0 RX injection and interrupts', () => {
       expect(uart.readWord(UART_REG.INT_RAW) & RXFIFO_TOUT).toBe(0);
     });
 
+    // CLKDIV=2 (int part, frag=0) -> baudRate = 80MHz*16/(2*16) = 40MHz;
+    // TOUT_THRD=1 -> rx_tout_thres=8 bits -> timeout = 8 * 1e9 / 40MHz = 200ns.
     it('fires RXFIFO_TOUT and onInterruptChange once the idle period elapses', () => {
       const uart = new Uart0();
-      uart.writeWord(UART_REG.CLKDIV, 2); // clkdiv=2 (int part), frag=0
-      uart.writeWord(UART_REG.CONF1, conf1(0, 0, 1, true)); // TOUT_THRD=1 -> rx_tout_thres=8 bits
+      uart.writeWord(UART_REG.CLKDIV, 2);
+      uart.writeWord(UART_REG.CONF1, conf1(0, 0, 1, true));
       uart.writeWord(UART_REG.INT_ENA, RXFIFO_TOUT);
       const events: boolean[] = [];
       uart.onInterruptChange = (active) => events.push(active);
 
-      uart.pushRx(1); // arms the timeout: 8 bits * clkdiv(2) = 16 cycles
-      uart.advance(15n);
+      uart.pushRx(1); // arms a 200ns timeout
+      uart.advance(199n);
       expect(events).toEqual([]);
-      uart.advance(1n); // reaches 16
+      uart.advance(1n); // reaches 200ns
       expect(events).toEqual([true]);
       expect(uart.readWord(UART_REG.INT_RAW) & RXFIFO_TOUT).toBe(RXFIFO_TOUT);
     });
@@ -156,10 +158,10 @@ describe('Uart0 RX injection and interrupts', () => {
       uart.writeWord(UART_REG.CLKDIV, 2);
       uart.writeWord(UART_REG.CONF1, conf1(0, 0, 1, true));
 
-      uart.pushRx(1); // arms 16-cycle countdown
-      uart.advance(15n);
-      uart.pushRx(2); // re-arms - back to a fresh 16-cycle countdown
-      uart.advance(15n);
+      uart.pushRx(1); // arms a 200ns countdown
+      uart.advance(199n);
+      uart.pushRx(2); // re-arms - back to a fresh 200ns countdown
+      uart.advance(199n);
       expect(uart.readWord(UART_REG.INT_RAW) & RXFIFO_TOUT).toBe(0);
     });
 
@@ -169,7 +171,7 @@ describe('Uart0 RX injection and interrupts', () => {
       uart.writeWord(UART_REG.CONF1, conf1(0, 0, 1, true));
       uart.writeWord(UART_REG.INT_ENA, RXFIFO_TOUT);
       uart.pushRx(1);
-      uart.advance(16n);
+      uart.advance(200n);
       expect(uart.readWord(UART_REG.INT_RAW) & RXFIFO_TOUT).toBe(RXFIFO_TOUT);
 
       const events: boolean[] = [];

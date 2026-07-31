@@ -28,13 +28,13 @@
  * (a `Cpu` holds a `Bus`, not the other way around) - call
  * `bus.intmatrix.attach(cpu)` once after constructing both.
  *
- * `tick(cycles)` forwards a cycle delta (typically `cpu.lastStepCycles`,
- * see `cpu/cpu.ts`) to every peripheral implementing an optional `advance`
- * method - the entry point for peripherals that need *some* notion of
- * elapsed time (TIMG's counters/WDT) to actually advance. Same shape as
- * `intmatrix.attach`: `SystemBus` doesn't loop or hold a `Cpu` reference
- * itself, a driver calls `cpu.step(); bus.tick(cpu.lastStepCycles)` once per
- * step.
+ * `tick(nanos)` forwards real elapsed nanoseconds (typically
+ * `cpu.lastStepNanos`, see `cpu/cpu.ts`) to every peripheral implementing an
+ * optional `advance` method - the entry point for peripherals that need
+ * *some* notion of elapsed time (TIMG's counters/WDT, UART's RX timeout and
+ * TX pacing) to actually advance. Same shape as `intmatrix.attach`:
+ * `SystemBus` doesn't loop or hold a `Cpu` reference itself, a driver calls
+ * `cpu.step(); bus.tick(cpu.lastStepNanos)` once per step.
  *
  * Unlike `intmatrix.attach(cpu)` (which needs a `Cpu` the embedder
  * constructs separately), TIMG0's `onInterruptChange`/`onWdtReset`, GPIO's
@@ -78,8 +78,8 @@ const DPORT_INTMATRIX_OFFSET = 0x104;
 interface PeripheralDevice {
   readWord(offset: number): number;
   writeWord(offset: number, value: number): void;
-  /** Optional: advance this peripheral's own clock-driven state (counters, watchdogs, baud pacing) by `cycles` - see `SystemBus.tick`. */
-  advance?(cycles: bigint): void;
+  /** Optional: advance this peripheral's own clock-driven state (counters, watchdogs, baud pacing) by `nanos` real elapsed nanoseconds - see `SystemBus.tick`. */
+  advance?(nanos: bigint): void;
 }
 
 interface PeripheralSlot {
@@ -140,17 +140,19 @@ export class SystemBus implements Bus {
   }
 
   /**
-   * Forward `cycles` (typically `cpu.lastStepCycles` right after `cpu.step()`
-   * - see `cpu/cpu.ts`'s `CYCLE_COST` doc comment for what this is and isn't)
-   * to every peripheral that implements `advance` - TIMG's counters/WDT,
-   * eventually UART's TX pacing. `SystemBus` doesn't loop or hold a `Cpu`
-   * reference itself (same reason `intmatrix.attach(cpu)` is a separate step
-   * the embedder takes) - a driver (a `Board`, or a test) calls this once per
-   * `cpu.step()`.
+   * Forward `nanos` real elapsed nanoseconds (typically `cpu.lastStepNanos`
+   * right after `cpu.step()` - see `cpu/cpu.ts`'s `cpuFreqHz`/`lastStepNanos`
+   * doc comment) to every peripheral that implements `advance` - TIMG's
+   * counters/WDT, UART's RX timeout and TX pacing, each converting real time
+   * into their own real, documented clock rate (TIMG/UART both run off the
+   * fixed 80MHz APB bus, independent of the CPU's own clock). `SystemBus`
+   * doesn't loop or hold a `Cpu` reference itself (same reason
+   * `intmatrix.attach(cpu)` is a separate step the embedder takes) - a
+   * driver (a `Board`, or a test) calls this once per `cpu.step()`.
    */
-  tick(cycles: bigint): void {
+  tick(nanos: bigint): void {
     for (const slot of this.peripherals) {
-      slot.device.advance?.(cycles);
+      slot.device.advance?.(nanos);
     }
   }
 

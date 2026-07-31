@@ -679,3 +679,18 @@ intermediate value: CPU-cycle-approximate but expressed in a unit every
 peripheral can convert into its own real, documented clock rate. This is
 the foundation for real UART baud pacing (below) and more accurate TIMG
 timing - see each file's own updated doc comment for the conversion math.
+
+`SystemBus.tick`, `Timg`, and `Uart0` all consume that real unit now
+instead of raw cycles. `Timg`'s `advance(nanos)` converts incoming
+nanoseconds into real APB ticks via a shared `apbTicksFromNanos` helper
+(`ticks = nanos * 80MHz / (1e9 * divisor)`, tracking a nanosecond
+remainder across calls so repeated small `advance()` calls - the intended
+one-`Cpu.step()`-at-a-time pattern - don't lose precision to integer
+division), used by both T0/T1's `DIVIDER` and the WDT's `PRESCALE`.
+`Uart0`'s `RXFIFO_TOUT` idle timeout is computed directly in real
+nanoseconds now too, via the reference's own real formula
+(`ns = rxToutThresBits * 1e9 / baudRate`) with `baudRate` derived from
+`UART_CLKDIV` exactly as `uart_calc_baud` does (the `TICK_REF_ALWAYS_ON`/
+80MHz-APB path only - `REF_TICK` isn't modeled) - no more indirect
+"cycles via clkdiv" conversion trick, since real elapsed time is now
+available directly from `Cpu`.

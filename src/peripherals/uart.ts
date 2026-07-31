@@ -48,21 +48,18 @@
  * `RXFIFO_TOUT`'s idle timeout (`esp32_uart_set_rx_timeout`/
  * `uart_rx_timeout_timer_cb`) is real-time-based in the reference (an
  * absolute-ns `QEMUTimer`, armed for `rx_tout_thres` bit-times from now,
- * scaled by the configured baud rate). This interpreter has no wall clock,
- * so `advance(cycles)` polls it instead: arming the timeout converts
- * `UART_CONF1`'s `TOUT_THRD` (already pre-multiplied by 8, matching the
- * reference's own `rx_tout_thres = 8 * TOUT_THRD`) directly into a cycle
- * count via `UART_CLKDIV`'s fixed-point divider - `cycles = thresholdBits *
- * clkdiv` falls out of the reference's own ns formula once `ns_per_bit =
- * clkdiv / baud_rate_scale` is substituted in, so no separate APB-frequency
- * constant is needed (same "one Cpu cycle == one APB tick" convention
- * `peripherals/timer.ts` already documents). The timer is armed
- * unconditionally by `pushRx` (matching `uart_receive`'s own unconditional
- * `esp32_uart_set_rx_timeout` call) and by a `UART_CONF1` write - real
- * hardware doesn't require the FIFO to actually hold unread data for this
- * timeout to eventually fire, a quirk preserved here too. Only the
- * `TICK_REF_ALWAYS_ON` (80MHz APB) clock path is modeled; the `REF_TICK`
- * (1MHz) alternative `UART_CONF0` can select is not.
+ * scaled by the configured baud rate) - and now that `Cpu`/`SystemBus` give
+ * every peripheral real elapsed nanoseconds (`cpu/cpu.ts`'s `cpuFreqHz`/
+ * `lastStepNanos`, `soc/bus.ts`'s `tick`), `advance(nanos)` can compute it
+ * exactly the same way: `ns = rxToutThresBits * 1e9 / baudRate`, with
+ * `baudRate` derived from `UART_CLKDIV`'s fixed-point divider exactly as
+ * `uart_calc_baud` does (assuming the `TICK_REF_ALWAYS_ON`/80MHz-APB clock
+ * path - the `REF_TICK` (1MHz) alternative `UART_CONF0` can select isn't
+ * modeled). The timer is armed unconditionally by `pushRx` (matching
+ * `uart_receive`'s own unconditional `esp32_uart_set_rx_timeout` call) and
+ * by a `UART_CONF1` write - real hardware doesn't require the FIFO to
+ * actually hold unread data for this timeout to eventually fire, a quirk
+ * preserved here too.
  */
 
 export const UART_REG = {
@@ -95,6 +92,10 @@ const TXFIFO_EMPTY_BIT = 1 << 1;
 const RXFIFO_TOUT_BIT = 1 << 8;
 const TX_DONE_BIT = 1 << 14;
 
+/** ESP32's real, fixed APB peripheral-bus clock - the TICK_REF_ALWAYS_ON path uart_calc_baud assumes (see class doc comment). */
+const APB_FREQ_HZ = 80_000_000n;
+const NANOS_PER_SECOND = 1_000_000_000n;
+
 export class Uart0 {
   private readonly regs = new Map<number, number>();
   private readonly rxFifo: number[] = [];
@@ -108,8 +109,8 @@ export class Uart0 {
   private rxToutThresBits = 0; // esp32_uart_write's rx_tout_thres = 8 * TOUT_THRD, already pre-multiplied
   private rxToutEna = false;
   private rxfifoTout = false;
-  /** Cycles remaining until the RX idle timeout fires, or null if not armed - see class doc comment. */
-  private rxTimeoutCycles: bigint | null = null;
+  /** Real nanoseconds remaining until the RX idle timeout fires, or null if not armed - see class doc comment. */
+  private rxTimeoutNanos: bigint | null = null;
 
   private clkdivInt = 0x2b6; // reset default (esp32_uart_reset_hold)
   private clkdivFrag = 0;
@@ -126,25 +127,31 @@ export class Uart0 {
     this.updateIrq();
   }
 
-  /** Advance the RX idle-timeout countdown by `cycles` - see class doc comment. */
-  advance(cycles: bigint): void {
-    if (this.rxTimeoutCycles === null) return;
-    this.rxTimeoutCycles -= cycles;
-    if (this.rxTimeoutCycles > 0n) return;
-    this.rxTimeoutCycles = null;
+  /** Advance the RX idle-timeout countdown by `nanos` real elapsed nanoseconds - see class doc comment. */
+  advance(nanos: bigint): void {
+    if (this.rxTimeoutNanos === null) return;
+    this.rxTimeoutNanos -= nanos;
+    if (this.rxTimeoutNanos > 0n) return;
+    this.rxTimeoutNanos = null;
     this.rxfifoTout = true;
     this.updateIrq();
   }
 
+  /** uart_calc_baud, TICK_REF_ALWAYS_ON path only (see class doc comment). */
+  private baudRate(): bigint {
+    const clkdivX16 = BigInt(this.clkdivInt) * 16n + BigInt(this.clkdivFrag);
+    if (clkdivX16 === 0n) return 115_200n; // reset default, matches the reference's own clkdiv===0 fallback
+    return (APB_FREQ_HZ * 16n) / clkdivX16;
+  }
+
   private armRxTimeout(): void {
     if (!this.rxToutEna) {
-      this.rxTimeoutCycles = null;
+      this.rxTimeoutNanos = null;
       this.rxfifoTout = false;
       return;
     }
-    // rx_tout_thres bit-times, converted straight to cycles via clkdiv - see class doc comment.
-    const clkdivX16 = BigInt(this.clkdivInt) * 16n + BigInt(this.clkdivFrag);
-    this.rxTimeoutCycles = (BigInt(this.rxToutThresBits) * clkdivX16) / 16n;
+    // esp32_uart_set_rx_timeout: ns = rx_tout_thres bit-times / baud rate.
+    this.rxTimeoutNanos = (BigInt(this.rxToutThresBits) * NANOS_PER_SECOND) / this.baudRate();
   }
 
   private setActive(active: boolean): void {
