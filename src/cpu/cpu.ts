@@ -48,11 +48,13 @@
  *     restoring PS/window state and retrying), not a claimed-accurate spill.
  *
  * Exceptions, from `exc_helper.c` (`HELPER(exception_cause)`) and
- * `core-esp32/core-isa.h` (`XCHAL_*_VECOFS`): illegal instructions and
- * (recursively) a second exception while PS.EXCM is already set both vector
- * through the same general path (EPC1=pc, PS.EXCM=1, jump to the kernel or
- * double-exception vector - this repo assumes PS.UM=0, i.e. no user/kernel
- * ring split, as real ESP-IDF/bare-metal firmware runs entirely in ring 0).
+ * `core-esp32/core-isa.h` (`XCHAL_*_VECOFS`): illegal instructions, integer
+ * divide-by-zero (QUOU/QUOS/REMU/REMS, checked before the divide itself -
+ * `gen_zero_check` in translate.c), and (recursively) a second exception
+ * while PS.EXCM is already set all vector through the same general path
+ * (EPC1=pc, PS.EXCM=1, jump to the kernel or double-exception vector - this
+ * repo assumes PS.UM=0, i.e. no user/kernel ring split, as real
+ * ESP-IDF/bare-metal firmware runs entirely in ring 0).
  * Window over/underflow vector directly to their own dedicated, size-keyed
  * vector slots instead, with no EXCCAUSE involved, exactly as
  * `HELPER(window_check)`/`HELPER(test_underflow_retw)` do. VECBASE defaults
@@ -63,6 +65,12 @@
  * comment for why SLL/SRL/SRA/SRC don't need to track which of those set it
  * last. SLLI/SRAI/SRLI take their shift amount from the instruction itself
  * instead and never touch SAR.
+ *
+ * QUOS/REMS (signed divide/remainder): `INT_MIN / -1` can't be represented
+ * in 32 bits, so real hardware special-cases it rather than trapping or
+ * producing garbage (`translate_quos` in translate.c, shared by both
+ * opcodes via a `par[0]` flag) - QUOS returns INT_MIN unchanged, REMS
+ * returns 0. QUOU/REMU (unsigned) have no such case.
  *
  * Nothing here throws for a bad-but-real CPU condition (ARCHITECTURE.md):
  * illegal opcodes and window over/underflow are all handled by vectoring,
@@ -81,6 +89,7 @@ export interface Bus {
 
 export type ExceptionCause =
   | { kind: 'illegal' }
+  | { kind: 'divide-by-zero' }
   | { kind: 'double' }
   | { kind: 'window-overflow'; size: 4 | 8 | 12 }
   | { kind: 'window-underflow'; size: 4 | 8 | 12 };
@@ -155,13 +164,28 @@ export class Cpu {
     return (b0 | (b1 << 8) | (b2 << 16)) >>> 0;
   }
 
-  /** HELPER(exception_cause): illegal instruction, escalating to a double exception if PS.EXCM was already set. */
-  private raiseIllegal(pc: number): number {
+  /**
+   * HELPER(exception_cause): the general exception path (illegal
+   * instruction, integer divide-by-zero, ...) - both vector to the same
+   * kernel slot and only differ in EXCCAUSE, which this repo doesn't model
+   * as a register (there's no other consumer of it yet), just the
+   * `ExceptionCause` tag. Escalates to the double-exception vector if
+   * PS.EXCM was already set, exactly as `HELPER(exception_cause)` does.
+   */
+  private raiseGeneralException(pc: number, cause: { kind: 'illegal' } | { kind: 'divide-by-zero' }): number {
     const wasExcm = this.excm;
     this.epc1 = pc >>> 0;
     this.excm = true;
-    this.lastException = wasExcm ? { kind: 'double' } : { kind: 'illegal' };
+    this.lastException = wasExcm ? { kind: 'double' } : cause;
     return (this.vecbase + (wasExcm ? VEC_DOUBLE : VEC_KERNEL)) >>> 0;
+  }
+
+  private raiseIllegal(pc: number): number {
+    return this.raiseGeneralException(pc, { kind: 'illegal' });
+  }
+
+  private raiseDivideByZero(pc: number): number {
+    return this.raiseGeneralException(pc, { kind: 'divide-by-zero' });
   }
 
   private raiseWindowOverflow(pc: number, owb: number, size: 4 | 8 | 12): number {
@@ -211,6 +235,49 @@ export class Cpu {
       case 'ABS':
         this.regs.set(inst.dest, Math.abs(this.regs.get(inst.src) | 0) >>> 0);
         break;
+      case 'NSA': {
+        // clrsb: redundant leading sign bits, not counting the sign bit itself.
+        const v = this.regs.get(inst.src) | 0;
+        this.regs.set(inst.dest, (v < 0 ? Math.clz32(~v) : Math.clz32(v)) - 1);
+        break;
+      }
+      case 'NSAU':
+        this.regs.set(inst.dest, Math.clz32(this.regs.get(inst.src) >>> 0));
+        break;
+      case 'MULL':
+        this.regs.set(inst.dest, Math.imul(this.regs.get(inst.src1), this.regs.get(inst.src2)) >>> 0);
+        break;
+      case 'QUOU':
+      case 'QUOS':
+      case 'REMU':
+      case 'REMS': {
+        const dividend = this.regs.get(inst.src1);
+        const divisor = this.regs.get(inst.src2);
+        if (divisor === 0) {
+          nextPc = this.raiseDivideByZero(pc);
+          break;
+        }
+        if (inst.op === 'QUOU') {
+          this.regs.set(inst.dest, Math.floor(dividend / divisor) >>> 0);
+        } else if (inst.op === 'REMU') {
+          this.regs.set(inst.dest, (dividend >>> 0) % (divisor >>> 0));
+        } else {
+          // QUOS/REMS: signed. INT_MIN / -1 would overflow a 32-bit signed
+          // result, so real hardware special-cases it (translate_quos)
+          // rather than trapping: QUOS returns INT_MIN unchanged, REMS
+          // returns 0.
+          const sDividend = dividend | 0;
+          const sDivisor = divisor | 0;
+          if (sDividend === -0x80000000 && sDivisor === -1) {
+            this.regs.set(inst.dest, inst.op === 'QUOS' ? 0x80000000 : 0);
+          } else if (inst.op === 'QUOS') {
+            this.regs.set(inst.dest, (sDividend / sDivisor | 0) >>> 0);
+          } else {
+            this.regs.set(inst.dest, (sDividend % sDivisor) >>> 0);
+          }
+        }
+        break;
+      }
       case 'SLL': {
         const shiftAmt = (32 - this.sar) & 0x3f; // always this formula - see the `sar` field's comment
         const value = this.regs.get(inst.src);

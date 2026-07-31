@@ -54,6 +54,14 @@ const SLLI = (dest: number, src: number, shift: number) => {
 };
 const SRAI = (dest: number, src: number, shift: number) => (((shift >> 4) & 0x1) << 20) | (0x2 << 20) | (0x1 << 16) | (dest << 12) | ((shift & 0xf) << 8) | (src << 4);
 const SRLI = (dest: number, src: number, shift: number) => (0x4 << 20) | (0x1 << 16) | (dest << 12) | ((shift & 0xf) << 8) | (src << 4);
+const NSA = (dest: number, src: number) => (0x4 << 20) | (0xe << 12) | (src << 8) | (dest << 4);
+const NSAU = (dest: number, src: number) => (0x4 << 20) | (0xf << 12) | (src << 8) | (dest << 4);
+const MULL = (dest: number, s1: number, s2: number) => (0x8 << 20) | (0x2 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const QUOU = (dest: number, s1: number, s2: number) => (0xc << 20) | (0x2 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const QUOS = (dest: number, s1: number, s2: number) => (0xd << 20) | (0x2 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const REMU = (dest: number, s1: number, s2: number) => (0xe << 20) | (0x2 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const REMS = (dest: number, s1: number, s2: number) => (0xf << 20) | (0x2 << 16) | (dest << 12) | (s1 << 8) | (s2 << 4);
+const ADDI = (dest: number, src: number, imm: number) => ((imm & 0xff) << 16) | (0xc << 12) | (src << 8) | (dest << 4) | 0x2;
 const RET = 0x000080;
 const MOVI = (dest: number, imm: number) => {
   const raw12 = imm & 0xfff;
@@ -610,6 +618,123 @@ describe('Cpu fetch/execute', () => {
       cpu.step();
       cpu.step();
       expect(cpu.regs.get(2)).toBe(0x100 >>> 4);
+    });
+  });
+
+  describe('ADDI, NSA/NSAU, MULL, and the div32 family', () => {
+    it('runs 24-bit ADDI (dest = src + signed imm8)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 10));
+      bus.writeInsn(3, ADDI(2, 1, -3));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(2)).toBe(7);
+    });
+
+    it('NSA counts redundant leading sign bits (clrsb)', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0)); // 0: 31 redundant sign bits
+      bus.writeInsn(3, NSA(2, 1));
+      bus.writeInsn(6, MOVI(1, -1)); // all-ones: 31 redundant sign bits
+      bus.writeInsn(9, NSA(3, 1));
+      bus.writeInsn(12, MOVI(1, 4)); // 0b100: sign bit 0, 28 redundant zero bits above it
+      bus.writeInsn(15, NSA(4, 1));
+
+      for (let i = 0; i < 6; i++) cpu.step();
+      expect(cpu.regs.get(2)).toBe(31);
+      expect(cpu.regs.get(3)).toBe(31);
+      expect(cpu.regs.get(4)).toBe(28);
+    });
+
+    it('NSAU counts leading zero bits, 32 for a zero input', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, 0));
+      bus.writeInsn(3, NSAU(2, 1));
+      bus.writeInsn(6, MOVI(1, 1));
+      bus.writeInsn(9, NSAU(3, 1));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(2)).toBe(32);
+      expect(cpu.regs.get(3)).toBe(31);
+    });
+
+    it('MULL multiplies and wraps to the low 32 bits', () => {
+      const { cpu, bus } = makeCpu();
+      // 0x7fff is outside MOVI's +/-2048..2047 range, so set both operands
+      // directly rather than via MOVI (which would silently sign-truncate).
+      cpu.regs.set(1, 0x7fff);
+      cpu.regs.set(2, 0x7fff);
+      bus.writeInsn(0, MULL(3, 1, 2));
+
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe((0x7fff * 0x7fff) >>> 0);
+    });
+
+    it('QUOU/REMU perform unsigned division and remainder', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, -1)); // 0xffffffff as an unsigned dividend
+      bus.writeInsn(3, MOVI(2, 10));
+      bus.writeInsn(6, QUOU(3, 1, 2));
+      bus.writeInsn(9, REMU(4, 1, 2));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe(Math.floor(0xffffffff / 10));
+      expect(cpu.regs.get(4)).toBe(0xffffffff % 10);
+    });
+
+    it('QUOS/REMS perform signed division and remainder, truncating toward zero', () => {
+      const { cpu, bus } = makeCpu();
+      bus.writeInsn(0, MOVI(1, -7));
+      bus.writeInsn(3, MOVI(2, 2));
+      bus.writeInsn(6, QUOS(3, 1, 2));
+      bus.writeInsn(9, REMS(4, 1, 2));
+
+      for (let i = 0; i < 4; i++) cpu.step();
+      expect(cpu.regs.get(3)).toBe((-3) >>> 0); // -7/2 truncates to -3, not floor's -4
+      expect(cpu.regs.get(4)).toBe((-1) >>> 0); // -7 % 2 == -1 in C/Xtensa semantics
+    });
+
+    it('QUOS handles INT_MIN / -1 without overflow (returns INT_MIN)', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.regs.set(1, 0x80000000); // INT_MIN, out of MOVI's 12-bit range
+      bus.writeInsn(0, MOVI(2, -1));
+      bus.writeInsn(3, QUOS(3, 1, 2));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe(0x80000000);
+    });
+
+    it('REMS handles INT_MIN % -1 without overflow (returns 0)', () => {
+      const { cpu, bus } = makeCpu();
+      cpu.regs.set(1, 0x80000000);
+      bus.writeInsn(0, MOVI(2, -1));
+      bus.writeInsn(3, REMS(3, 1, 2));
+
+      cpu.step();
+      cpu.step();
+      expect(cpu.regs.get(3)).toBe(0);
+    });
+
+    it.each([
+      ['QUOU', QUOU],
+      ['QUOS', QUOS],
+      ['REMU', REMU],
+      ['REMS', REMS],
+    ] as const)('%s raises a divide-by-zero exception instead of dividing', (_name, encode) => {
+      const { cpu, bus } = makeCpu();
+      cpu.vecbase = 0x400;
+      bus.writeInsn(0, MOVI(1, 10));
+      bus.writeInsn(3, MOVI(2, 0));
+      bus.writeInsn(6, encode(3, 1, 2));
+
+      cpu.step();
+      cpu.step();
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'divide-by-zero' });
+      expect(cpu.pc).toBe(cpu.vecbase + 0x300);
+      expect(cpu.regs.get(3)).toBe(0); // untouched - the divide never ran
     });
   });
 });
