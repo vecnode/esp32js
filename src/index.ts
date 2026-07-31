@@ -1,5 +1,5 @@
 export { RegisterFile } from './cpu/registers.js';
-export { decode } from './cpu/decode.js';
+export { decode, instructionLength } from './cpu/decode.js';
 export type { Decoded } from './cpu/decode.js';
 export { Cpu } from './cpu/cpu.js';
 export type { Bus, ExceptionCause } from './cpu/cpu.js';

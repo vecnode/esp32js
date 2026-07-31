@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decode } from '../../src/cpu/decode.js';
+import { decode, instructionLength } from '../../src/cpu/decode.js';
 
 // Instruction words below are hand-assembled from the same field formulas
 // decode.ts implements (see its header comment for the source), not just
@@ -171,5 +171,120 @@ describe('decode', () => {
     const word = 0xdead0f; // op0=0xf, not in the covered set
     const result = decode(word);
     expect(result.op).toBe('ILLEGAL');
+  });
+
+  describe('instructionLength', () => {
+    it('is 3 for a 24-bit opcode (e.g. ADD, op0=0)', () => {
+      expect(instructionLength(rrr(0x8, 0x0, 1, 2, 3))).toBe(3);
+    });
+
+    it.each([0x8, 0x9, 0xa, 0xb, 0xc, 0xd])('is 2 for a density opcode (op0=0x%s)', (op0) => {
+      expect(instructionLength(op0)).toBe(2);
+    });
+
+    it.each([0xe, 0xf])('is 3 for an unassigned-but-24-bit op0 (0x%s)', (op0) => {
+      expect(instructionLength(op0)).toBe(3);
+    });
+  });
+
+  describe('density (16-bit) instructions', () => {
+    it('decodes L32I.N (op0=8) reusing the L32I tag, offset = r * 4', () => {
+      const t = 3;
+      const s = 1;
+      const r = 5; // -> byte offset 20
+      const word = (r << 12) | (s << 8) | (t << 4) | 0x8;
+      expect(decode(word)).toEqual({ op: 'L32I', dest: 3, base: 1, offset: 20 });
+    });
+
+    it('decodes S32I.N (op0=9) reusing the S32I tag', () => {
+      const t = 7;
+      const s = 2;
+      const r = 3; // -> byte offset 12
+      const word = (r << 12) | (s << 8) | (t << 4) | 0x9;
+      expect(decode(word)).toEqual({ op: 'S32I', src: 7, base: 2, offset: 12 });
+    });
+
+    it('decodes ADD.N (op0=10) reusing the ADD tag', () => {
+      const r = 4; // dest
+      const s = 1; // src1
+      const t = 2; // src2
+      const word = (r << 12) | (s << 8) | (t << 4) | 0xa;
+      expect(decode(word)).toEqual({ op: 'ADD', dest: 4, src1: 1, src2: 2 });
+    });
+
+    it('decodes ADDI.N with a literal 1-15 immediate', () => {
+      const r = 5; // dest
+      const s = 6; // src
+      const t = 9; // ai4const raw -> literal 9
+      const word = (r << 12) | (s << 8) | (t << 4) | 0xb;
+      expect(decode(word)).toEqual({ op: 'ADDI', dest: 5, src: 6, imm: 9 });
+    });
+
+    it('decodes ADDI.N with a raw-0 immediate as -1 (the ai4const special case)', () => {
+      const word = (5 << 12) | (6 << 8) | (0 << 4) | 0xb;
+      expect(decode(word)).toEqual({ op: 'ADDI', dest: 5, src: 6, imm: -1 });
+    });
+
+    it('decodes MOVI.N (op0=12,i=0) with dest=s (not t) and a positive immediate', () => {
+      // imm7 = 0x2b (43, in the plain-positive 0-95 range); hi=bits[6:4]=0x2, lo=r=0xb
+      const dest = 4; // s field
+      const hi = 0x2;
+      const lo = 0xb;
+      const word = (lo << 12) | (dest << 8) | (hi << 4) | 0xc; // i=bit7=0 since hi<0x8
+      expect(decode(word)).toEqual({ op: 'MOVI', dest: 4, imm: 0x2b });
+    });
+
+    it('decodes MOVI.N with the asymmetric negative range (raw7 in [0x60,0x7f] -> -32..-1)', () => {
+      // raw7=0x60 (hi=0x6,lo=0x0) -> both top bits of the 7-bit field set -> sign-extends to -32
+      const dest = 2;
+      const hi = 0x6;
+      const lo = 0x0;
+      const word = (lo << 12) | (dest << 8) | (hi << 4) | 0xc;
+      expect(decode(word)).toEqual({ op: 'MOVI', dest: 2, imm: -32 });
+    });
+
+    it('decodes BEQZ.N (op0=12,i=1,z=0) with a0-relative comparison against zero', () => {
+      // imm6 = 0x15 (21); hi=bits[5:4]=0x1, lo=r=0x5; i=1,z=0 -> word bit7=1,bit6=0
+      const a = 3; // s field
+      const hi = 0x1;
+      const lo = 0x5;
+      const word = (lo << 12) | (a << 8) | (hi << 4) | (1 << 7) | 0xc;
+      expect(decode(word)).toEqual({ op: 'BEQZ', a: 3, offset: 0x15 });
+    });
+
+    it('decodes BNEZ.N (op0=12,i=1,z=1)', () => {
+      const a = 5;
+      const hi = 0x0;
+      const lo = 0x8;
+      const word = (lo << 12) | (a << 8) | (hi << 4) | (1 << 7) | (1 << 6) | 0xc;
+      expect(decode(word)).toEqual({ op: 'BNEZ', a: 5, offset: 0x8 });
+    });
+
+    it('decodes MOV.N (op0=13,r=0) as a plain register copy', () => {
+      const dest = 4; // t field
+      const src = 7; // s field
+      const word = (0 << 12) | (src << 8) | (dest << 4) | 0xd;
+      expect(decode(word)).toEqual({ op: 'MOV', dest: 4, src: 7 });
+    });
+
+    it('decodes RET.N (op0=13,r=15,t=0) reusing the RET tag', () => {
+      const word = (0xf << 12) | (0 << 4) | 0xd;
+      expect(decode(word)).toEqual({ op: 'RET' });
+    });
+
+    it('decodes RETW.N (op0=13,r=15,t=1) reusing the RETW tag', () => {
+      const word = (0xf << 12) | (1 << 4) | 0xd;
+      expect(decode(word)).toEqual({ op: 'RETW' });
+    });
+
+    it('decodes NOP.N (op0=13,r=15,t=3,s=0)', () => {
+      const word = (0xf << 12) | (0 << 8) | (3 << 4) | 0xd;
+      expect(decode(word)).toEqual({ op: 'NOP' });
+    });
+
+    it('decodes ILL.N (op0=13,r=15,t=6,s=0) as ILLEGAL - not specially handled', () => {
+      const word = (0xf << 12) | (0 << 8) | (6 << 4) | 0xd;
+      expect(decode(word).op).toBe('ILLEGAL');
+    });
   });
 });
