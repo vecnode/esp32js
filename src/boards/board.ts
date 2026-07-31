@@ -12,8 +12,8 @@
  * one place that constructs them together and performs the wiring steps
  * `SystemBus`'s own doc comment says an embedder must do itself
  * (`bus.intmatrix.attach(cpu)`) plus the one a driving loop must do every
- * step (`cpu.step(); bus.tick(cpu.lastStepCycles)`, see `cpu/cpu.ts`'s
- * `CYCLE_COST` and `soc/bus.ts`'s `tick` doc comments) - so callers don't
+ * step (`cpu.step(); bus.tick(cpu.lastStepNanos)`, see `cpu/cpu.ts`'s
+ * `cpuFreqHz` and `soc/bus.ts`'s `tick` doc comments) - so callers don't
  * have to know that sequencing exists.
  *
  * One `Board` class serves all boards (`new Board(ESP32_DEVKIT_V1)`,
@@ -83,10 +83,10 @@ export class Board {
     this.cpu.pc = image.entry >>> 0;
   }
 
-  /** Executes one instruction, then advances every clock-driven peripheral by that instruction's cycle cost. */
+  /** Executes one instruction, then advances every clock-driven peripheral by that instruction's real elapsed time. */
   step(): void {
     this.cpu.step();
-    this.bus.tick(this.cpu.lastStepCycles);
+    this.bus.tick(this.cpu.lastStepNanos);
   }
 
   /** Convenience: `step()` `count` times. */

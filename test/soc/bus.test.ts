@@ -317,7 +317,7 @@ describe('SystemBus', () => {
       // EN | INCREASE | LEVEL_INT | ALARM, divider raw=1 -> real divider 2
       bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.T0CONFIG, (1 << 31) | (1 << 30) | (1 << 11) | (1 << 10) | (1 << 13));
 
-      bus.tick(10n); // 10/2 = 5 ticks, reaches the alarm
+      bus.tick(125n); // 125ns / 25ns-per-tick (divider 2 @ 80MHz APB) = 5 ticks, reaches the alarm
       cpu.step();
       expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
     });
@@ -329,10 +329,10 @@ describe('SystemBus', () => {
 
       bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTPROTECT, 0x50d83aa1);
       bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG2, 5); // stage 0 timeout
-      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG1, 1 << 16); // prescale=1
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG1, 8 << 16); // prescale=8 -> 100ns/tick
       bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG0, (1 << 31) | (3 << 29)); // EN | STG0=3 (system-reset)
 
-      bus.tick(5n);
+      bus.tick(500n); // 5 ticks
       expect(resetFired).toBe('wdt-sys');
       expect(bus.rtcCntl.readWord(RTC_CNTL_REG.RESET_STATE) & 0x3f).toBe(RESET_CAUSE.TG0WDT_SYS_RESET);
     });
