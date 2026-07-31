@@ -37,7 +37,7 @@ QEMU upstream — since it already carries the physicalsim-specific behavior
 | `soc/registers.ts` (base addrs) | `include/hw/esp32/esp32_reg.h` (`DR_REG_*_BASE`) | see table below |
 | `peripherals/gpio.ts` | `hw/esp32/esp32_gpio.c` — **done (digital I/O only)**, see Phase 4 status | function-select-dependent behavior not modeled - see `peripherals/iomux.ts` |
 | `peripherals/iomux.ts` | `hw/esp32/esp32_iomux.c` — **done (per-pin register storage)**, see Phase 4 status | pins 28-31 undocumented in the reference itself, omitted here too; no GPIO function-select side effects |
-| `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (registers + WDT unlock/feed, no free-running clock)**, see Phase 4 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far |
+| `peripherals/timer.ts` | `hw/esp32/esp32_timg.c` — **done (T0/T1 counters + alarms, full WDT stage pipeline)**, see Phase 4/5 status | TIMG0/TIMG1, each with a watchdog; only TIMG0 wired into `soc/bus.ts` so far; polled `advance(cycles)`, not real-time-paced like the reference |
 | `peripherals/uart.ts` | `hw/esp32/esp32_uart.c` — **done (TX only)**, see Phase 4 status | 3 instances on real hardware (UART0/1/2); only UART0 implemented so far |
 | `peripherals/adc.ts` | `hw/esp32/esp32_sens.c` — **done (ADC1/ADC2 channel select + injected value read)**, see Phase 4 status | touch sensor channels and ADC_ATTEN/width config not modeled |
 | `peripherals/intmatrix.ts` | `hw/xtensa/esp32_intc.c`, `include/hw/xtensa/esp32_intc.h` — **done (matrix mechanism)**, see Phase 4 status | peripheral IRQ → CPU interrupt line; source indices from `include/hw/esp32/esp32_reg.h`'s `ETS_*_INTR_SOURCE` enum |
@@ -427,31 +427,18 @@ raw digital I/O regardless of what's written there.
 
 `peripherals/timer.ts`'s `Timg` (TIMG0's registers + WDT unlock/feed) is
 the third live peripheral, from `include/hw/esp32/esp32_timg.h`/`hw/esp32/
-esp32_timg.c`. A scope decision here is worth restating plainly rather than
-leaving implicit: the reference paces T0/T1's counters against real elapsed
-wall-clock time (`qemu_clock_get_ns`, scaled by a configured divider) and
-fires alarm interrupts via a `QEMUTimer` callback - this interpreter has no
-notion of elapsed time at all (`Cpu.step()` executes one instruction with
-no time cost attached), so there's nothing correct to scale a counter
-against yet. Rather than invent an arbitrary "N ticks per step" model that
-would look plausible but correspond to nothing in the reference, T0/T1's
-counters are plain stored values, set only by `TxLOAD`/`LOADLO`/`LOADHI`
-and never advancing on their own; `TxUPDATE` (which normally samples the
-live count) is consequently a no-op. The watchdog's *unlock/lock/feed*
-mechanism (`TIMG_WDTPROTECT`'s magic-word gate at `0x50D83AA1`,
-`TIMG_WDTFEED`) has no such timing dependency and is exactly what real boot
-firmware needs to interact with correctly (disable or feed the watchdog
-early in `app_main`), so it's implemented faithfully even though the
-watchdog itself never actually times out here. `test/soc/bus.test.ts`
-includes a real "disable the watchdog" boot idiom test (unlock, clear
-WDTCONFIG0's EN bit, re-lock) run through `S32I` end to end.
-
-Not implemented for TIMG0: any interrupt ever actually firing
-(`TIMG_INT_RAW` is never set by this peripheral - same root cause as the
-counters); LACT (the legacy always-on RTC timer) and RTC calibration
-registers; TIMG1 as a wired second instance (the `Timg` class itself is
-instance-agnostic and works for either, only TIMG0 is connected to
-`soc/bus.ts` so far).
+esp32_timg.c`. At this point in the project it was register storage only -
+T0/T1 never advanced and the watchdog never timed out, since nothing gave
+`Cpu.step()` any notion of elapsed time to scale a counter against yet. The
+watchdog's *unlock/lock/feed* mechanism (`TIMG_WDTPROTECT`'s magic-word
+gate, `TIMG_WDTFEED`) was implemented faithfully regardless, since it's
+exactly what real boot firmware needs to interact with correctly (disable
+or feed the watchdog early in `app_main`) and has no timing dependency of
+its own. `test/soc/bus.test.ts` includes a real "disable the watchdog" boot
+idiom test (unlock, clear WDTCONFIG0's EN bit, re-lock) run through `S32I`
+end to end. T0/T1 actually advancing, real alarm interrupts, and the WDT's
+full stage-timeout pipeline came later, once `Cpu` gained a cycle counter -
+see Phase 5 status below for the current, real behavior.
 
 `peripherals/intmatrix.ts`'s `IntMatrix` is the fourth live peripheral -
 the real 69-entry-per-CPU register array from `hw/xtensa/esp32_intc.c`
@@ -536,10 +523,61 @@ relative weights only (memory access and divide/FPU ops cost more than a
 register-register ALU op) - enough to give TIMG/UART a monotonic clock to
 advance against, not a timing-accuracy claim.
 
-Still open for Phase 5: a `SystemBus.tick(cycles)` path forwarding to
-peripherals that implement an `advance(cycles)` method; TIMG's counters and
-WDT actually advancing/timing out against it; GPIO edge/level interrupt
-generation; UART RX injection, interrupt generation, and TX pacing; and a
-`Board` runtime (`src/boards/`) tying `Cpu`+`SystemBus`+a `BoardDefinition`
-together with firmware loading and pin/serial passthroughs for ESP32 DevKit
-V1, DevKit C V4, and ESP32-CAM.
+`soc/bus.ts`'s `SystemBus.tick(cycles)` now exists too, forwarding to every
+peripheral implementing an optional `advance(cycles)` - `SystemBus` still
+doesn't loop or hold a `Cpu` reference itself (a driver calls
+`cpu.step(); bus.tick(cpu.lastStepCycles)` once per step), the same
+separation `intmatrix.attach(cpu)` already established.
+
+`peripherals/timer.ts`'s `Timg` is a real clock and a real watchdog now,
+not just register storage. T0/T1's `advance(cycles)` scales `cycles` by the
+configured `DIVIDER` field (`esp32_timg_timer_div_from_reg`'s exact
+remapping: raw 0 -> 65536, raw 1 or 2 -> 2, else as-is) and advances the
+64-bit counter; reaching `TxALARM` (with the `ALARM` bit armed and
+`LEVEL_INT` set) raises that timer's interrupt. A genuinely surprising
+reference detail is preserved deliberately rather than "fixed": `ALARM` is
+a one-shot arm bit that self-clears the instant it fires -
+`AUTORELOAD` reloads the *counter* from `TxLOAD`, but does **not** by
+itself keep the alarm re-armed for next time (`esp32_timg_timer_cb`
+clears its local `alarm` flag before reloading, so `esp32_timg_timer_
+update_alarm`'s subsequent call bails immediately) - real firmware using
+autoreload must rewrite `TxCONFIG` with `ALARM=1` after every interrupt.
+The WDT's full `esp32_timg_wdt_update_config`/`esp32_timg_wdt_cb` pipeline
+is implemented too: each stage (`WDTCONFIG0`'s `STG0-3` fields) counts
+against its own timeout (`WDTCONFIG2-5`, scaled by `WDTCONFIG1`'s
+`PRESCALE`) and on expiry performs that stage's configured action (off /
+interrupt / CPU-reset / system-reset) before advancing to the next stage
+(wrapping after 4); `WDTFEED` now genuinely resets stage and counter back
+to 0 rather than being a no-op, and enabling the WDT (`EN` 0->1) does the
+same, matching the reference's `en && !old_en` branch. A WDT stage
+configured as CPU/system-reset calls a new `Timg.onWdtReset` hook, which
+`soc/bus.ts` wires to a new `RtcCntl.triggerWdtReset(kind)` - extending
+`RESET_CAUSE` with the two real ESP32 causes attributed to a timer group's
+watchdog (`TG0WDT_SYS_RESET=7`, `TGWDT_CPU_RESET=11`,
+`esp32_rtc_cntl.h`), fired through the same `onReset` hook a software
+reset already uses. `Timg.onInterruptChange(source, active)` reports each
+of T0/T1/WDT's live `INT_ENA & INT_RAW` condition (only when it flips),
+which `soc/bus.ts`'s constructor wires directly to
+`IntMatrix.setSourceLevel` at the matching `INTMATRIX_SOURCE.TG0_*` index -
+unlike `intmatrix.attach(cpu)`, this wiring doesn't need an external `Cpu`
+reference, since `SystemBus` already owns both peripheral instances, so it
+happens immediately in the constructor. `test/soc/bus.test.ts` proves both
+paths end to end: a real T0 alarm reaching a real `Cpu` through the matrix
+via `bus.tick()`, and a real WDT system-reset reaching `RtcCntl.onReset`.
+
+Not implemented for TIMG: LACT (the legacy always-on RTC timer) and RTC
+calibration registers; edge-triggered interrupts (`EDGE_INT` config bits
+are decoded but ignored - this repo's interrupt matrix only models
+level-type lines for every peripheral so far); `WDTCONFIG0.FLASHBOOT_
+MODE_EN` (ties the watchdog to a board-level "flash boot mode" flag this
+repo doesn't track); TIMG1 as a second instance; firing more than once per
+`advance()` call when a single call's cycle delta is large enough to cross
+an alarm/timeout more than once - harmless for the intended
+one-`Cpu.step()`-at-a-time driving pattern, worth flagging for a caller
+batching many steps into one `tick()`.
+
+Still open for Phase 5: GPIO edge/level interrupt generation; UART RX
+injection, interrupt generation, and TX pacing; and a `Board` runtime
+(`src/boards/`) tying `Cpu`+`SystemBus`+a `BoardDefinition` together with
+firmware loading and pin/serial passthroughs for ESP32 DevKit V1, DevKit C
+V4, and ESP32-CAM.

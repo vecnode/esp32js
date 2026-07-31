@@ -272,6 +272,38 @@ describe('SystemBus', () => {
       expect(bus.timg0.readWord(TIMG_REG.WDTCONFIG0)).toBe(0);
       expect(bus.timg0.readWord(TIMG_REG.WDTPROTECT)).toBe(0);
     });
+
+    it('drives a real T0 alarm interrupt end to end through the matrix to a real Cpu, via bus.tick()', () => {
+      const bus = new SystemBus();
+      const cpu = new Cpu(new RegisterFile(), bus, MEMORY_MAP.iram.base);
+      bus.intmatrix.attach(cpu);
+      cpu.intenable = 1 << 5; // route TG0_T0's source to CPU line 5 (level 1)
+      bus.write32(PERIPHERAL_BASE.dport + 0x104 + INTMATRIX_SOURCE.TG0_T0 * 4, 5);
+
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.INT_ENA, 0b1);
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.T0ALARMLO, 5);
+      // EN | INCREASE | LEVEL_INT | ALARM, divider raw=1 -> real divider 2
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.T0CONFIG, (1 << 31) | (1 << 30) | (1 << 11) | (1 << 10) | (1 << 13));
+
+      bus.tick(10n); // 10/2 = 5 ticks, reaches the alarm
+      cpu.step();
+      expect(cpu.lastException).toEqual({ kind: 'interrupt', level: 1 });
+    });
+
+    it('drives a real WDT system-reset end to end through bus.tick() to RtcCntl.onReset', () => {
+      const bus = new SystemBus();
+      let resetFired: string | undefined;
+      bus.rtcCntl.onReset = (cause) => (resetFired = cause);
+
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTPROTECT, 0x50d83aa1);
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG2, 5); // stage 0 timeout
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG1, 1 << 16); // prescale=1
+      bus.write32(PERIPHERAL_BASE.timg0 + TIMG_REG.WDTCONFIG0, (1 << 31) | (3 << 29)); // EN | STG0=3 (system-reset)
+
+      bus.tick(5n);
+      expect(resetFired).toBe('wdt-sys');
+      expect(bus.rtcCntl.readWord(RTC_CNTL_REG.RESET_STATE) & 0x3f).toBe(RESET_CAUSE.TG0WDT_SYS_RESET);
+    });
   });
 
   describe('interrupt matrix dispatch', () => {

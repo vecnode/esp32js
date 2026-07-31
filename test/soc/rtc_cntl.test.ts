@@ -96,4 +96,28 @@ describe('RtcCntl', () => {
     expect((state >>> 12) & 1).toBe(0);
     expect(state & 0x3f).toBe(RESET_CAUSE.POWERON_RESET); // reset cause untouched
   });
+
+  it('triggerWdtReset("cpu") sets TGWDT_CPU_RESET on PROCPU only and fires onReset("wdt-cpu")', () => {
+    const rtc = new RtcCntl();
+    let firedWith: string | undefined;
+    rtc.onReset = (cause) => (firedWith = cause);
+
+    rtc.triggerWdtReset('cpu');
+    expect(firedWith).toBe('wdt-cpu');
+    const state = rtc.readWord(RTC_CNTL_REG.RESET_STATE);
+    expect(state & 0x3f).toBe(RESET_CAUSE.TGWDT_CPU_RESET);
+    expect((state >>> 6) & 0x3f).toBe(RESET_CAUSE.POWERON_RESET); // APPCPU untouched
+  });
+
+  it('triggerWdtReset("sys") sets TG0WDT_SYS_RESET on both cores and fires onReset("wdt-sys")', () => {
+    const rtc = new RtcCntl();
+    let firedWith: string | undefined;
+    rtc.onReset = (cause) => (firedWith = cause);
+
+    rtc.triggerWdtReset('sys');
+    expect(firedWith).toBe('wdt-sys');
+    const state = rtc.readWord(RTC_CNTL_REG.RESET_STATE);
+    expect(state & 0x3f).toBe(RESET_CAUSE.TG0WDT_SYS_RESET);
+    expect((state >>> 6) & 0x3f).toBe(RESET_CAUSE.TG0WDT_SYS_RESET);
+  });
 });
