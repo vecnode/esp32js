@@ -11,9 +11,10 @@
  * between decode-time `xtensa_operand_decode` and `xtensa_operand_undo_reloc`.
  *
  * Covers both instruction widths:
- *   - 24-bit ("wide"): ADD, SUB, AND, OR, XOR, NEG, ABS, MOVI, L32I, S32I,
- *     L32R, L32E, S32E, J, BEQ, BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET,
- *     RETW, RFWO, RFWU, SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI.
+ *   - 24-bit ("wide"): ADD, SUB, ADDI, AND, OR, XOR, NEG, ABS, NSA, NSAU,
+ *     MULL, QUOU, QUOS, REMU, REMS, MOVI, L32I, S32I, L32R, L32E, S32E, J,
+ *     BEQ, BNE, BLT, BGE, CALL0, CALL4/8/12, ENTRY, RET, RETW, RFWO, RFWU,
+ *     SLL, SRL, SRA, SRC, SLLI, SRAI, SRLI, SSR, SSL, SSAI.
  *   - 16-bit ("density"/".N"): ADD.N, ADDI.N, L32I.N, S32I.N, MOVI.N,
  *     BEQZ.N, BNEZ.N, MOV.N, RET.N, RETW.N, NOP.N.
  * Anything else decodes to ILLEGAL - the opcode table matches translate.c's
@@ -56,6 +57,9 @@ export type Decoded =
   | { op: 'SUB'; dest: number; src1: number; src2: number }
   | { op: 'AND' | 'OR' | 'XOR'; dest: number; src1: number; src2: number }
   | { op: 'NEG' | 'ABS'; dest: number; src: number }
+  | { op: 'NSA' | 'NSAU'; dest: number; src: number }
+  | { op: 'MULL'; dest: number; src1: number; src2: number }
+  | { op: 'QUOU' | 'QUOS' | 'REMU' | 'REMS'; dest: number; src1: number; src2: number }
   | { op: 'ADDI'; dest: number; src: number; imm: number }
   | { op: 'MOV'; dest: number; src: number }
   | { op: 'MOVI'; dest: number; imm: number }
@@ -155,7 +159,18 @@ export function decode(word: number): Decoded {
           if (r === 0x0) return { op: 'SSR', src: s };
           if (r === 0x1) return { op: 'SSL', src: s };
           if (r === 0x4) return { op: 'SSAI', shift: ((t & 0x1) << 4) | s };
+          // NSA/NSAU: r=0xe/0xf (fixed), dest=t, src=s (r is not a register here).
+          if (r === 0xe) return { op: 'NSA', dest: t, src: s };
+          if (r === 0xf) return { op: 'NSAU', dest: t, src: s };
         }
+      }
+      if (op1 === 0x2) {
+        // MULL (32x32->32 multiply) and the div32 family: r=dest, s=src1, t=src2.
+        if (op2 === 0x8) return { op: 'MULL', dest: r, src1: s, src2: t };
+        if (op2 === 0xc) return { op: 'QUOU', dest: r, src1: s, src2: t };
+        if (op2 === 0xd) return { op: 'QUOS', dest: r, src1: s, src2: t };
+        if (op2 === 0xe) return { op: 'REMU', dest: r, src1: s, src2: t };
+        if (op2 === 0xf) return { op: 'REMS', dest: r, src1: s, src2: t };
       }
       if (op1 === 0x1) {
         // Shifts: op2 selects. SLLI/SRAI's op2 LSB doubles as the shift
@@ -192,6 +207,7 @@ export function decode(word: number): Decoded {
     case 0x2: // LSAI family: r selects sub-op, s = base reg, t = dest/src reg
       if (r === 0x2) return { op: 'L32I', dest: t, base: s, offset: imm8 << 2 };
       if (r === 0x6) return { op: 'S32I', src: t, base: s, offset: imm8 << 2 };
+      if (r === 0xc) return { op: 'ADDI', dest: t, src: s, imm: sext(imm8, 8) };
       if (r === 0xa) {
         // MOVI: 12-bit signed immediate reassembled from s (high nibble) + imm8 (low byte)
         const raw12 = ((s << 8) | imm8) & 0xfff;
